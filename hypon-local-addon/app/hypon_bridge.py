@@ -295,6 +295,7 @@ class LocalMqtt:
             raise ConnectionError("connection closed by broker")
         finally:
             ping.cancel()
+            writer.close()
 
     async def _pinger(self, writer):
         while True:

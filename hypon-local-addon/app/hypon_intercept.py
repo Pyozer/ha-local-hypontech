@@ -207,7 +207,7 @@ class Interceptor:
                 ipaddress.IPv4Address(value)
             except ValueError:
                 raise SystemExit(f"{label} {value!r} is not a valid IPv4 address "
-                                 "(expected something like 192.168.1.87)")
+                                 "(expected something like 192.168.1.87)") from None
         route_iface, route_gw = default_route()
         if not self.iface:
             self.iface = route_iface
