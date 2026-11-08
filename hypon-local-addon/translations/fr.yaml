@@ -29,6 +29,9 @@ configuration:
   publish_raw:
     name: Publier les trames brutes
     description: "Publie aussi les trames brutes en hexadécimal sur hypon/raw/*. Utile uniquement pour aider à décoder les champs inconnus."
+  offline_grace:
+    name: Délai avant « hors ligne » (secondes)
+    description: "Durée de silence de l'onduleur avant de le déclarer hors ligne (production remise à 0, totaux conservés). Absorbe les coupures/reconnexions du collecteur Wi-Fi au crépuscule. 0 = immédiat."
   mqtt_host:
     name: Hôte du broker MQTT
     description: "Laissez vide pour utiliser le broker fourni par Home Assistant (recommandé). À renseigner uniquement pour un autre broker."

@@ -21,6 +21,7 @@ import os
 import re
 import struct
 import sys
+import time
 
 LOG = logging.getLogger("hypon")
 
@@ -49,6 +50,10 @@ class Config:
         self.upstream_port = int(e("HYPON_UPSTREAM_PORT", "1883"))
         self.cloud_retry_s = int(e("HYPON_CLOUD_RETRY_S", "300"))
         self.base_topic = e("HYPON_BASE_TOPIC", "hypon")
+        # Availability of the bridge itself (MQTT Last Will): what the sensors depend on.
+        self.status_topic = f"{self.base_topic}/bridge/status"
+        # Seconds without the collector before it is declared offline (absorbs dusk flapping).
+        self.offline_grace_s = int(e("HYPON_OFFLINE_GRACE_S", "300"))
         self.publish_raw = e("HYPON_PUBLISH_RAW", "on").lower() not in ("off", "0", "false", "no")
         self.ha_host = e("HA_MQTT_HOST")
         self.ha_port = int(e("HA_MQTT_PORT", "1883"))
@@ -225,11 +230,23 @@ SENSORS = [
     ("energy_pv2", "PV2 énergie totale", "kWh", "energy", "total_increasing"),
 ]
 
+# Instantaneous production values forced to 0 while the collector is offline (no sun, inverter
+# asleep), like the Hypon cloud does. Totals, temperature and grid voltage/frequency keep their
+# last value.
+ZERO_WHEN_OFFLINE = (
+    "power", "pv1_voltage", "pv1_current", "pv1_power",
+    "pv2_voltage", "pv2_current", "pv2_power", "grid_current",
+)
+
 
 # --------------------------------------------------------------------------- local broker client
 
 class LocalMqtt:
-    """Minimal MQTT 3.1.1 publisher (QoS 0) with automatic reconnection."""
+    """Minimal MQTT 3.1.1 publisher (QoS 0) with automatic reconnection.
+
+    Registers a retained Last Will "offline" on the bridge status topic, so entities only become
+    unavailable when the add-on itself is gone, not when the inverter sleeps.
+    """
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -251,8 +268,8 @@ class LocalMqtt:
         cfg = self.cfg
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(cfg.ha_host, cfg.ha_port), 10)
-        flags = 0x02
-        payload = enc_str("hypon-bridge")
+        flags = 0x02 | 0x04 | 0x20  # clean session + will + retained will (QoS 0)
+        payload = enc_str("hypon-bridge") + enc_str(cfg.status_topic) + enc_str("offline")
         if cfg.ha_user:
             flags |= 0x80
             payload += enc_str(cfg.ha_user)
@@ -268,6 +285,7 @@ class LocalMqtt:
             raise ConnectionError(f"CONNACK refused (code {connack[3]})")
         LOG.info("local MQTT: connected to %s:%s", cfg.ha_host, cfg.ha_port)
         self.writer = writer
+        await self.publish(cfg.status_topic, "online", retain=True)
         if self.on_connect:
             await self.on_connect()
         ping = asyncio.create_task(self._pinger(writer))
@@ -315,6 +333,10 @@ class Bridge:
         self.local.on_connect = self._on_local_connect
         self.devices = {}  # inverter S/N -> info dict
         self.announced = set()
+        self.connected = set()      # inverter S/N currently considered online
+        self.last_state = {}        # inverter S/N -> last decoded monitor frame
+        self.last_seen = {}         # inverter S/N -> time.monotonic() of the last live frame
+        self.offline_tasks = {}     # inverter S/N -> pending "declare offline" task
 
     async def _on_local_connect(self):
         self.announced.clear()
@@ -332,9 +354,15 @@ class Bridge:
                          data["pv1_current"], data["pv2_voltage"], data["pv2_current"],
                          data["grid_voltage"], data["grid_frequency"], data["temperature"],
                          data["energy_total"])
+                self.last_seen[sn] = time.monotonic()
+                self.last_state[sn] = data
+                self.connected.add(sn)
+                pending = self.offline_tasks.pop(sn, None)
+                if pending:
+                    pending.cancel()
                 await self._announce(sn)
                 await self.local.publish(f"{base}/{sn}/state", json.dumps(data), retain=True)
-                await self.local.publish(f"{base}/{sn}/availability", "online", retain=True)
+                await self.local.publish(f"{base}/{sn}/connection", "ON", retain=True)
             elif topic == "offinvmonitor":
                 data = decode_monitor(payload)
                 LOG.info("buffered frame from %s: P=%sW E=%skWh",
@@ -367,6 +395,9 @@ class Bridge:
         }
         if info.get("firmware"):
             device["sw_version"] = info["firmware"]
+        # Entities depend on the bridge (Last Will), NOT on the inverter: when the inverter sleeps at
+        # night they keep their last/zeroed value instead of going "unavailable".
+        availability_topic = self.cfg.status_topic
         for key, name, unit, dev_class, state_class in SENSORS:
             config = {
                 "name": name,
@@ -374,7 +405,7 @@ class Bridge:
                 "object_id": f"hypon_{key}",
                 "state_topic": f"{base}/{sn}/state",
                 "value_template": "{{ value_json.%s }}" % key,
-                "availability_topic": f"{base}/{sn}/availability",
+                "availability_topic": availability_topic,
                 "unit_of_measurement": unit,
                 "device_class": dev_class,
                 "state_class": state_class,
@@ -382,10 +413,55 @@ class Bridge:
             }
             await self.local.publish(f"{prefix}/sensor/hypon_{sn}/{key}/config",
                                      json.dumps(config), retain=True)
+        connection = {
+            "name": "Connexion",
+            "unique_id": f"hypon_{sn}_connection",
+            "object_id": "hypon_connection",
+            "state_topic": f"{base}/{sn}/connection",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "availability_topic": availability_topic,
+            "device_class": "connectivity",
+            "entity_category": "diagnostic",
+            "device": device,
+        }
+        await self.local.publish(f"{prefix}/binary_sensor/hypon_{sn}/connection/config",
+                                 json.dumps(connection), retain=True)
+        # Clear the per-inverter availability topic used by versions <= 0.2.0 (retained "offline").
+        await self.local.publish(f"{base}/{sn}/availability", "", retain=True)
 
     async def on_device_gone(self):
-        for sn in list(self.announced) or list(self.devices):
-            await self.local.publish(f"{self.cfg.base_topic}/{sn}/availability", "offline", retain=True)
+        """The collector's TCP session ended. Do not flag the inverter offline right away: at dusk
+        it drops and reconnects repeatedly. Wait the grace period, then check nothing came back."""
+        since = time.monotonic()
+        for sn in list(self.connected):
+            pending = self.offline_tasks.pop(sn, None)
+            if pending:
+                pending.cancel()
+            self.offline_tasks[sn] = asyncio.create_task(self._offline_after_grace(sn, since))
+
+    async def _offline_after_grace(self, sn, since):
+        task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self.cfg.offline_grace_s)
+            if self.last_seen.get(sn, 0) > since:
+                return  # a live frame arrived in the meantime: the collector is back
+            await self._mark_offline(sn)
+        finally:
+            if self.offline_tasks.get(sn) is task:
+                del self.offline_tasks[sn]
+
+    async def _mark_offline(self, sn):
+        self.connected.discard(sn)
+        state = dict(self.last_state.get(sn, {}))
+        if state:
+            for key in ZERO_WHEN_OFFLINE:
+                if key in state:
+                    state[key] = 0
+            await self.local.publish(f"{self.cfg.base_topic}/{sn}/state", json.dumps(state), retain=True)
+        await self.local.publish(f"{self.cfg.base_topic}/{sn}/connection", "OFF", retain=True)
+        LOG.info("inverter %s offline for %ss: production zeroed, totals kept",
+                 sn, self.cfg.offline_grace_s)
 
     async def tap(self, first_byte, body, origin):
         ptype = first_byte >> 4

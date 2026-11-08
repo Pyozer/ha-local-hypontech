@@ -18,6 +18,7 @@ export HYPON_UPSTREAM_HOST="$(bashio::config 'cloud_host')"
 export HYPON_UPSTREAM_PORT="$(bashio::config 'cloud_port')"
 export HYPON_BASE_TOPIC="$(bashio::config 'base_topic')"
 export HA_DISCOVERY_PREFIX="$(bashio::config 'discovery_prefix')"
+export HYPON_OFFLINE_GRACE_S="$(bashio::config 'offline_grace')"
 if bashio::config.true 'publish_raw'; then
     export HYPON_PUBLISH_RAW="on"
 else

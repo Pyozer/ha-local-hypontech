@@ -29,6 +29,9 @@ configuration:
   publish_raw:
     name: Publish raw frames
     description: "Also publish the raw frames as hex on hypon/raw/*. Only useful to help decode unknown fields."
+  offline_grace:
+    name: Offline delay (seconds)
+    description: "How long the inverter must stay silent before it is reported offline (production set to 0, totals kept). Absorbs the Wi-Fi collector dropping and reconnecting at dusk. 0 = immediately."
   mqtt_host:
     name: MQTT broker host
     description: "Leave empty to use the broker provided by Home Assistant (recommended). Set only to use a different broker."

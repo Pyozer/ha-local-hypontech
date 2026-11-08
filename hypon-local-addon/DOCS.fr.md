@@ -58,6 +58,7 @@ sur le réseau de l'hôte Home Assistant :
 | `base_topic` | `hypon` | Préfixe des topics d'état publiés |
 | `discovery_prefix` | `homeassistant` | Préfixe MQTT Discovery |
 | `publish_raw` | `false` | Publie aussi les trames brutes en hex (`hypon/raw/*`) pour poursuivre le décodage |
+| `offline_grace` | `300` | Secondes de silence avant de déclarer l'onduleur hors ligne (voir ci-dessous). `0` = immédiat |
 | `mqtt_host` | *(service HA)* | Broker MQTT manuel ; vide = fourni par Home Assistant |
 | `mqtt_port` / `mqtt_user` / `mqtt_password` | — | Identifiants MQTT manuels (si `mqtt_host` renseigné) |
 | `debug` | `false` | Journaux détaillés |
@@ -69,6 +70,24 @@ que cette IP (normalement votre box, ex. `192.168.1.254`) se trouve sur la carte
 réseau de Home Assistant. Laissée vide, elle est détectée automatiquement à partir
 de la route par défaut de l'hôte. Ne la changez que si votre passerelle réelle n'est
 pas celle détectée.
+
+### Nuit et disponibilité
+
+Le micro-onduleur et son collecteur Wi-Fi sont alimentés par les panneaux : ils
+s'éteignent au crépuscule et le collecteur peut se déconnecter / se reconnecter
+plusieurs fois autour du coucher du soleil. Les capteurs **restent disponibles** :
+leur disponibilité suit l'add-on lui-même (Last Will MQTT sur
+`<base_topic>/bridge/status`), pas l'onduleur.
+
+Quand l'onduleur reste silencieux pendant `offline_grace` secondes :
+
+- le capteur binaire de diagnostic **Connexion** passe à *off* ;
+- les valeurs instantanées (puissance, tension/courant/puissance PV, courant
+  réseau) sont mises à `0`, comme le fait le cloud Hypon ;
+- les totaux d'énergie, la température et la tension/fréquence réseau gardent leur
+  dernière valeur.
+
+Tout reprend à la première trame du lendemain matin.
 
 ## Vérifier que ça marche
 

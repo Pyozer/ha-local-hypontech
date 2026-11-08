@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-08
+### Changed
+- Sensors no longer become `unavailable` when the inverter goes to sleep (dusk,
+  night) or the Wi-Fi collector drops. Their availability now follows the add-on
+  itself through an MQTT Last Will on `<base_topic>/bridge/status`.
+- While the inverter is offline, instantaneous production values (power, PV
+  voltage/current/power, grid current) are published as `0`, like the Hypon
+  cloud does; energy totals, temperature and grid voltage/frequency keep their
+  last value.
+
+### Added
+- `Connexion` diagnostic binary sensor (`connectivity`) reporting whether the
+  inverter is currently reachable.
+- `offline_grace` option (default 300 s): delay before the inverter is declared
+  offline, absorbing the collector reconnecting repeatedly around sunset.
+
+### Fixed
+- Stale retained `<base_topic>/<sn>/availability` topic from previous versions is
+  cleared on discovery.
+
 ## [0.2.0] - 2026-11-08
 ### Added
 - Name and description for every option in the add-on UI (English and French

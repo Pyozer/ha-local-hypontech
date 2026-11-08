@@ -1,5 +1,5 @@
 name: Hypon Local Bridge
-version: "0.2.0"
+version: "0.3.0"
 slug: hypon_local
 description: >-
   Read your Hypon micro-inverter (COM-WF collector, HMS-800W and variants)
@@ -33,6 +33,7 @@ options:
   base_topic: "hypon"
   discovery_prefix: "homeassistant"
   publish_raw: false
+  offline_grace: 300
   mqtt_host: ""
   mqtt_port: 1883
   mqtt_user: ""
@@ -49,6 +50,7 @@ schema:
   base_topic: "str"
   discovery_prefix: "str"
   publish_raw: "bool"
+  offline_grace: "int(0,3600)"
   mqtt_host: "str?"
   mqtt_port: "port"
   mqtt_user: "str?"

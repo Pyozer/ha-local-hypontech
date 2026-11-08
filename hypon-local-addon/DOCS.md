@@ -58,6 +58,7 @@ Assistant host network, this add-on:
 | `base_topic` | `hypon` | Prefix of the published state topics |
 | `discovery_prefix` | `homeassistant` | MQTT Discovery prefix |
 | `publish_raw` | `false` | Also publish raw frames as hex (`hypon/raw/*`) to keep decoding |
+| `offline_grace` | `300` | Seconds of silence before the inverter is reported offline (see below). `0` = immediately |
 | `mqtt_host` | *(HA service)* | Manual MQTT broker; empty = provided by Home Assistant |
 | `mqtt_port` / `mqtt_user` / `mqtt_password` | — | Manual MQTT credentials (if `mqtt_host` is set) |
 | `debug` | `false` | Verbose logs |
@@ -68,6 +69,22 @@ This is the address the add-on **impersonates towards the module**: the micro-in
 will believe that this IP (normally your router, e.g. `192.168.1.254`) is on the Home
 Assistant network card. Left empty, it is detected automatically from the host's
 default route. Only change it if your real gateway is not the detected one.
+
+### Night and availability
+
+The micro-inverter and its Wi-Fi collector are powered by the panels, so they switch
+off at dusk and the collector may drop and reconnect several times around sunset.
+The sensors **stay available**: their availability follows the add-on itself (MQTT
+Last Will on `<base_topic>/bridge/status`), not the inverter.
+
+When the inverter has been silent for `offline_grace` seconds:
+
+- the **Connexion** diagnostic binary sensor switches to *off*;
+- instantaneous values (power, PV voltage/current/power, grid current) are set to
+  `0`, as the Hypon cloud does;
+- energy totals, temperature and grid voltage/frequency keep their last value.
+
+Everything resumes with the first frame the next morning.
 
 ## Verify it works
 
