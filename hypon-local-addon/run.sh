@@ -8,7 +8,7 @@ export HYPON_GW_IP="$(bashio::config 'gateway_ip')"
 export HYPON_IFACE="$(bashio::config 'interface')"
 export HYPON_LISTEN_PORT="$(bashio::config 'listen_port')"
 
-# --- pont / cloud ---------------------------------------------------------
+# --- bridge / cloud -------------------------------------------------------
 if bashio::config.true 'relay_to_cloud'; then
     export HYPON_UPSTREAM="on"
 else
@@ -27,32 +27,32 @@ if bashio::config.true 'debug'; then
     export HYPON_DEBUG="1"
 fi
 
-# --- MQTT : réglage manuel sinon service HA -------------------------------
+# --- MQTT: manual settings, otherwise the HA service ----------------------
 if bashio::config.has_value 'mqtt_host'; then
     export HA_MQTT_HOST="$(bashio::config 'mqtt_host')"
     export HA_MQTT_PORT="$(bashio::config 'mqtt_port')"
     export HA_MQTT_USER="$(bashio::config 'mqtt_user')"
     export HA_MQTT_PASSWORD="$(bashio::config 'mqtt_password')"
-    bashio::log.info "MQTT: broker manuel ${HA_MQTT_HOST}:${HA_MQTT_PORT}"
+    bashio::log.info "MQTT: manual broker ${HA_MQTT_HOST}:${HA_MQTT_PORT}"
 elif bashio::services.available 'mqtt'; then
     svc_host="$(bashio::services 'mqtt' 'host')"
-    # host_network : 'core-mosquitto' n'est pas toujours résoluble -> repli 127.0.0.1
+    # host_network: 'core-mosquitto' is not always resolvable -> fall back to 127.0.0.1
     if ! getent hosts "${svc_host}" >/dev/null 2>&1; then
-        bashio::log.warning "'${svc_host}' non résoluble en host_network, repli sur 127.0.0.1"
+        bashio::log.warning "'${svc_host}' not resolvable under host_network, falling back to 127.0.0.1"
         svc_host="127.0.0.1"
     fi
     export HA_MQTT_HOST="${svc_host}"
     export HA_MQTT_PORT="$(bashio::services 'mqtt' 'port')"
     export HA_MQTT_USER="$(bashio::services 'mqtt' 'username')"
     export HA_MQTT_PASSWORD="$(bashio::services 'mqtt' 'password')"
-    bashio::log.info "MQTT: service HA ${HA_MQTT_HOST}:${HA_MQTT_PORT}"
+    bashio::log.info "MQTT: HA service ${HA_MQTT_HOST}:${HA_MQTT_PORT}"
 else
-    bashio::log.warning "Aucun broker MQTT : les capteurs ne seront pas publiés (relais cloud seul)."
+    bashio::log.warning "No MQTT broker: sensors will not be published (cloud relay only)."
 fi
 
 if ! bashio::config.has_value 'inverter_ip'; then
-    bashio::exit.nok "Configurez 'inverter_ip' (IP du micro-onduleur) avant de démarrer."
+    bashio::exit.nok "Set 'inverter_ip' (the micro-inverter IP) before starting."
 fi
 
-bashio::log.info "Démarrage de l'interception Hypon pour ${HYPON_INV_IP}"
+bashio::log.info "Starting Hypon interception for ${HYPON_INV_IP}"
 exec python3 /app/hypon_intercept.py

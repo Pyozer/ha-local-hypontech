@@ -1,93 +1,94 @@
 # Hypon Local Bridge
 
-Récupère **localement** les mesures d'un micro-onduleur Hypon (collecteur Wi-Fi
-`COM-WF`, onduleur `HMS-800W` et variantes) et les publie dans Home Assistant via
-MQTT Discovery — **sans toucher au DNS, ni au DHCP, ni à la box**, et en gardant
-l'application constructeur fonctionnelle.
+Read the live data of a Hypon micro-inverter **locally** (Wi-Fi collector
+`COM-WF`, inverter `HMS-800W` and variants) and publish it to Home Assistant via
+MQTT Discovery — **without touching DNS, DHCP or your router** — while keeping the
+vendor app working.
 
-## Comment ça marche
+> 🇫🇷 Version française : [`DOCS.fr.md`](DOCS.fr.md)
 
-Le collecteur parle MQTT en clair (TCP 1883) vers `hk.hypon.cloud`. Cet add-on,
-sur le réseau de l'hôte Home Assistant :
+## How it works
 
-1. **ARP ciblé** — fait croire au **seul micro-onduleur** que la passerelle du
-   réseau, c'est Home Assistant. Tout le trafic sortant du module arrive alors sur
-   l'hôte HA. Aucun autre appareil n'est touché.
-2. **Redirection** — une règle `iptables` chirurgicale envoie le port 1883 du
-   module vers un pont local ; tout le reste de son trafic (DNS, NTP…) est
-   réacheminé normalement, pour ne rien casser.
-3. **Pont** — relaie la connexion octet pour octet vers le vrai cloud Hypon
-   (l'appli continue de marcher), décode les trames `invmonitor` et crée
-   automatiquement les capteurs dans Home Assistant.
-4. **À l'arrêt** — restaure immédiatement le cache ARP du module et supprime
-   toutes les règles ajoutées.
+The collector speaks clear-text MQTT (TCP 1883) to `hk.hypon.cloud`. On the Home
+Assistant host network, this add-on:
 
-## Prérequis importants
+1. **Targeted ARP** — makes **only the inverter** believe the network gateway is
+   Home Assistant. All of the module's outgoing traffic then arrives on the HA host.
+   No other device is affected.
+2. **Redirect** — a surgical `iptables` rule sends the module's port 1883 to a local
+   bridge; all of its other traffic (DNS, NTP…) is forwarded normally, so nothing
+   else breaks.
+3. **Bridge** — relays the connection byte-for-byte to the real Hypon cloud (the app
+   keeps working), decodes the `invmonitor` frames and creates the Home Assistant
+   sensors automatically.
+4. **On shutdown** — immediately heals the inverter's ARP cache and removes every
+   rule it added.
 
-- **Réseau « plat » (même segment L2).** L'ARP ne traverse ni routeur ni VLAN.
-  Home Assistant et le micro-onduleur doivent être sur le **même sous-réseau**
-  (ex. `192.168.1.0/24`). C'est le cas de la très grande majorité des installations
-  domestiques. Un répéteur / point d'accès Wi-Fi en pont ne gêne pas.
-- **Home Assistant OS / Supervised.** L'add-on a besoin du réseau de l'hôte
-  (`host_network`) et des droits `NET_ADMIN` / `NET_RAW`. Il ne peut donc **pas**
-  venir du store officiel : il s'installe via un **dépôt d'add-on personnalisé**
-  (voir le README).
-- **Un broker MQTT** (add-on *Mosquitto broker*). L'add-on récupère ses identifiants
-  automatiquement ; sinon renseignez-les à la main (voir options).
+## Important requirements
+
+- **Flat network (same L2 segment).** ARP does not cross a router or a VLAN. Home
+  Assistant and the micro-inverter must be on the **same subnet** (e.g.
+  `192.168.1.0/24`). This is the case for the vast majority of home installations. A
+  Wi-Fi repeater / access point in bridge mode is fine.
+- **Home Assistant OS / Supervised.** The add-on needs the host network
+  (`host_network`) and the `NET_ADMIN` / `NET_RAW` capabilities. It therefore cannot
+  come from the official store and is installed from a **custom add-on repository**
+  (see the repository README).
+- **An MQTT broker** (the *Mosquitto broker* add-on). Credentials are picked up
+  automatically; otherwise set them manually (see options).
 
 ## Installation
 
-1. Dans Home Assistant : **Paramètres → Modules complémentaires → Boutique →
-   menu ⋮ → Dépôts**, ajoutez l'URL du dépôt Git contenant cet add-on.
-2. Installez **Hypon Local Bridge**, puis ouvrez l'onglet **Configuration**.
-3. Renseignez au minimum `inverter_ip`, démarrez, et surveillez les **Journaux**.
+1. In Home Assistant: **Settings → Add-ons → Add-on Store → ⋮ menu → Repositories**,
+   add the URL of the Git repository that contains this add-on.
+2. Install **Hypon Local Bridge**, then open the **Configuration** tab.
+3. Set at least `inverter_ip`, start, and watch the **Log** tab.
 
 ## Options
 
-| Option | Défaut | Rôle |
+| Option | Default | Purpose |
 |---|---|---|
-| `inverter_ip` | *(obligatoire)* | IP du collecteur Wi-Fi du micro-onduleur |
-| `gateway_ip` | *(auto)* | IP de la passerelle usurpée vis-à-vis du module ; vide = passerelle par défaut détectée |
-| `interface` | *(auto)* | Interface réseau de l'hôte ; vide = détectée via la route par défaut |
-| `relay_to_cloud` | `true` | Relaie vers le cloud Hypon (laisse l'appli fonctionner). `false` = 100 % local |
-| `cloud_host` | `gateway-…amazonaws.com` | Nom AWS du cloud (évite une boucle). À ne changer que si besoin |
-| `cloud_port` | `1883` | Port du cloud |
-| `listen_port` | `18883` | Port local du pont (cible de la redirection). **Différent de 1883** pour ne pas entrer en conflit avec Mosquitto |
-| `base_topic` | `hypon` | Préfixe des topics d'état publiés |
-| `discovery_prefix` | `homeassistant` | Préfixe MQTT Discovery |
-| `publish_raw` | `false` | Publie aussi les trames brutes en hex (`hypon/raw/*`) pour poursuivre le décodage |
-| `mqtt_host` | *(service HA)* | Broker MQTT manuel ; vide = fourni par Home Assistant |
-| `mqtt_port` / `mqtt_user` / `mqtt_password` | — | Identifiants MQTT manuels (si `mqtt_host` renseigné) |
-| `debug` | `false` | Journaux détaillés |
+| `inverter_ip` | *(required)* | IP of the micro-inverter's Wi-Fi collector |
+| `gateway_ip` | *(auto)* | Gateway IP spoofed towards the module; empty = default gateway detected |
+| `interface` | *(auto)* | Host network interface; empty = detected from the default route |
+| `relay_to_cloud` | `true` | Relay to the Hypon cloud (keeps the app working). `false` = 100% local |
+| `cloud_host` | `gateway-…amazonaws.com` | AWS name of the cloud (avoids a loop). Change only if needed |
+| `cloud_port` | `1883` | Cloud port |
+| `listen_port` | `18883` | Local bridge port (redirect target). **Different from 1883** to avoid clashing with Mosquitto |
+| `base_topic` | `hypon` | Prefix of the published state topics |
+| `discovery_prefix` | `homeassistant` | MQTT Discovery prefix |
+| `publish_raw` | `false` | Also publish raw frames as hex (`hypon/raw/*`) to keep decoding |
+| `mqtt_host` | *(HA service)* | Manual MQTT broker; empty = provided by Home Assistant |
+| `mqtt_port` / `mqtt_user` / `mqtt_password` | — | Manual MQTT credentials (if `mqtt_host` is set) |
+| `debug` | `false` | Verbose logs |
 
-### À propos de `gateway_ip` (« l'adresse cible »)
+### About `gateway_ip` (the "target address")
 
-C'est l'adresse que l'add-on **usurpe auprès du module** : le micro-onduleur croira
-que cette IP (normalement votre box, ex. `192.168.1.254`) se trouve sur la carte
-réseau de Home Assistant. Laissée vide, elle est détectée automatiquement à partir
-de la route par défaut de l'hôte. Ne la changez que si votre passerelle réelle n'est
-pas celle détectée.
+This is the address the add-on **impersonates towards the module**: the micro-inverter
+will believe that this IP (normally your router, e.g. `192.168.1.254`) is on the Home
+Assistant network card. Left empty, it is detected automatically from the host's
+default route. Only change it if your real gateway is not the detected one.
 
-## Vérifier que ça marche
+## Verify it works
 
-- **Journaux** de l'add-on : vous devez voir `interface …`, `inverter MAC …`,
-  `netfilter: :1883 from … -> local :18883`, puis des trames `invmonitor`.
-- **Paramètres → Appareils et services → MQTT** : un appareil *Hypontech* avec ses
-  capteurs (puissance, tensions/courants PV, énergie…) apparaît tout seul.
+- Add-on **Log**: you should see `interface …`, `inverter MAC …`,
+  `netfilter: :1883 from … -> local :18883`, then `invmonitor` frames.
+- **Settings → Devices & Services → MQTT**: a *Hypontech* device with its sensors
+  (power, PV voltages/currents, energy…) appears on its own.
 
-## Dépannage
+## Troubleshooting
 
-- **`inverter … did not answer ARP`** : mauvaise IP, ou HA n'est pas sur le même
-  segment L2 que le module (VLAN/routeur entre les deux).
-- **Les capteurs n'apparaissent pas** mais les trames arrivent : problème MQTT. En
-  `host_network`, le nom `core-mosquitto` n'est pas toujours résolu ; renseignez
-  `mqtt_host` avec l'IP LAN de votre Home Assistant.
-- **Conflit de port** au démarrage du pont : changez `listen_port` (gardez-le
-  différent de 1883).
+- **`inverter … did not answer ARP`**: wrong IP, or HA is not on the same L2 segment
+  as the module (a VLAN/router sits between them).
+- **Sensors do not appear** but frames arrive: MQTT issue. Under `host_network`, the
+  name `core-mosquitto` is not always resolved; set `mqtt_host` to your Home
+  Assistant LAN IP.
+- **Port clash** when the bridge starts: change `listen_port` (keep it different
+  from 1883).
 
-## Sécurité et légalité
+## Safety and legality
 
-L'add-on n'agit que sur **votre** matériel, sur **votre** réseau, et vise **la seule
-IP du micro-onduleur**. Il ne s'attaque pas au cloud : il ne fait que relayer le
-trafic que le module émet déjà. À l'arrêt, le réseau revient exactement à son état
-initial.
+The add-on only acts on **your** hardware, on **your** network, and targets the
+**single IP of the micro-inverter**. It does not attack the cloud: it merely relays
+the traffic the module already sends. On shutdown, the network returns to exactly its
+previous state.

@@ -2,25 +2,26 @@ name: Hypon Local Bridge
 version: "0.1.0"
 slug: hypon_local
 description: >-
-  Récupère localement les données du micro-onduleur Hypon (collecteur COM-WF,
-  HMS-800W) sans toucher au DNS ni à la box : ARP ciblé sur le seul module +
-  redirection du port MQTT vers un pont qui relaie au cloud et publie dans Home
-  Assistant (MQTT Discovery).
-url: "https://github.com/votre-compte/hypon-local-addon"
+  Read your Hypon micro-inverter (COM-WF collector, HMS-800W and variants)
+  locally and publish it to Home Assistant via MQTT Discovery - no DNS change,
+  no router change - while still relaying to the Hypon cloud so the vendor app
+  keeps working.
+url: "https://github.com/Pyozer/ha-local-hypontech"
 arch:
   - aarch64
   - amd64
   - armv7
   - armhf
   - i386
+init: false
 startup: services
 boot: auto
-# Requis : socket raw (ARP) + manipulation réseau (iptables, ip_forward)
+# Required: raw socket (ARP) + network manipulation (iptables, ip_forward)
 host_network: true
 privileged:
   - NET_ADMIN
   - NET_RAW
-# Home Assistant fournit automatiquement les identifiants du broker MQTT
+# Home Assistant provides the MQTT broker credentials automatically
 services:
   - mqtt:need
 options:
