@@ -1,0 +1,57 @@
+name: Hypon Local Bridge
+version: "0.1.0"
+slug: hypon_local
+description: >-
+  Récupère localement les données du micro-onduleur Hypon (collecteur COM-WF,
+  HMS-800W) sans toucher au DNS ni à la box : ARP ciblé sur le seul module +
+  redirection du port MQTT vers un pont qui relaie au cloud et publie dans Home
+  Assistant (MQTT Discovery).
+url: "https://github.com/votre-compte/hypon-local-addon"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+  - armhf
+  - i386
+startup: services
+boot: auto
+# Requis : socket raw (ARP) + manipulation réseau (iptables, ip_forward)
+host_network: true
+privileged:
+  - NET_ADMIN
+  - NET_RAW
+# Home Assistant fournit automatiquement les identifiants du broker MQTT
+services:
+  - mqtt:need
+options:
+  inverter_ip: ""
+  gateway_ip: ""
+  interface: ""
+  relay_to_cloud: true
+  cloud_host: "gateway-be8b19e7047b780f.elb.eu-central-1.amazonaws.com"
+  cloud_port: 1883
+  listen_port: 18883
+  base_topic: "hypon"
+  discovery_prefix: "homeassistant"
+  publish_raw: false
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+  debug: false
+schema:
+  inverter_ip: "str"
+  gateway_ip: "str?"
+  interface: "str?"
+  relay_to_cloud: "bool"
+  cloud_host: "str"
+  cloud_port: "port"
+  listen_port: "port"
+  base_topic: "str"
+  discovery_prefix: "str"
+  publish_raw: "bool"
+  mqtt_host: "str?"
+  mqtt_port: "port"
+  mqtt_user: "str?"
+  mqtt_password: "password?"
+  debug: "bool"
