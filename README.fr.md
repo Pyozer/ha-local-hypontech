@@ -26,6 +26,10 @@ le dépannage.
 
 ## Ajouter ce dépôt à Home Assistant
 
+[![Ouvre ton instance Home Assistant avec ce dépôt pré-rempli dans la fenêtre d'ajout d'un dépôt d'add-ons.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FPyozer%2Fha-local-hypontech)
+
+Le bouton ci-dessus ouvre ton instance Home Assistant avec ce dépôt pré-rempli (il demande
+l'adresse de ton instance la première fois). Ou ajoute-le à la main :
 **Paramètres → Modules complémentaires → Boutique → menu ⋮ → Dépôts**, puis ajoute :
 
 ```
@@ -58,4 +62,8 @@ Installe ensuite **Hypon Local Bridge**, renseigne l'IP du micro-onduleur, déma
 
 ## Statut
 
-Première version, **non encore testée sur une installation HA réelle**.
+Testée sur une installation HA réelle.
+
+## Licence
+
+[MIT](LICENSE)

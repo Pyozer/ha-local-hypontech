@@ -24,6 +24,7 @@ On the Home Assistant host network, the add-on:
 | Path | Role |
 |---|---|
 | `repository.yaml` | Marks the repo as an HA add-on repository |
+| `LICENSE` | MIT license |
 | `hypon-local-addon/config.yaml` | Add-on manifest + options/schema |
 | `hypon-local-addon/build.yaml` | Base image per architecture (`BUILD_FROM`) |
 | `hypon-local-addon/Dockerfile` | Image build |

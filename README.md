@@ -25,6 +25,10 @@ See the add-on [`DOCS.md`](hypon-local-addon/DOCS.md) for options and troublesho
 
 ## Add this repository to Home Assistant
 
+[![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FPyozer%2Fha-local-hypontech)
+
+The button above opens your Home Assistant instance with this repository pre-filled (it asks
+for the address of your instance the first time). Or add it by hand:
 **Settings → Add-ons → Add-on Store → ⋮ menu → Repositories**, then add:
 
 ```
@@ -57,4 +61,8 @@ Then install **Hypon Local Bridge**, set the micro-inverter IP, and start.
 
 ## Status
 
-First version, **not yet tested on a real Home Assistant installation**.
+Tested on a real Home Assistant installation.
+
+## License
+
+[MIT](LICENSE)
