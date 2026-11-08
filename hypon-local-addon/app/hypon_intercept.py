@@ -140,14 +140,26 @@ class NetRules:
         run_ipt([rule[0], rule[1], "-D"] + rule[2:])
 
     def apply(self):
+        current = None
         try:
             with open("/proc/sys/net/ipv4/ip_forward") as f:
-                self._ip_forward_prev = f.read().strip()
-            with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
-                f.write("1\n")
-        except OSError as exc:
-            LOG.warning("cannot enable ip_forward (%s); non-MQTT traffic of the "
-                        "inverter may be disrupted", exc)
+                current = f.read().strip()
+        except OSError:
+            pass
+        if current == "1":
+            # Normal case on HA OS: Docker already enables forwarding on the host,
+            # and host_network means we inherit it. Nothing to change.
+            LOG.info("ip_forward already enabled on the host")
+        else:
+            try:
+                with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+                    f.write("1\n")
+                self._ip_forward_prev = current  # restore only what we changed
+                LOG.info("ip_forward enabled")
+            except OSError as exc:
+                LOG.warning("ip_forward is off and could not be enabled (%s); the "
+                            "inverter's non-MQTT traffic (DNS/NTP) may be disrupted. "
+                            "Enable net.ipv4.ip_forward=1 on the host if needed.", exc)
         self._add(self._fwd_out)
         self._add(self._fwd_in)
         self._add(self._redirect)
