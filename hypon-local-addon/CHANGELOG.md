@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 - 2026-11-08
+
+### Changed
+- Close the local MQTT socket when the broker drops the connection (it leaked a
+  file descriptor on every reconnect).
+
+### Removed
+- The deprecated `armv7` architecture (no longer supported by Home Assistant
+  since 2025.12). Supported: `aarch64`, `amd64`.
+- `boot: auto` from the manifest: it is the default value, as flagged by the
+  add-on linter.
+
 ## 0.3.1 - 2026-11-08
 
 ### Fixed
