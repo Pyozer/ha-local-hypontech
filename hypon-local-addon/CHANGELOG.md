@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 - 2026-11-08
+
+### Fixed
+- The add-on no longer exits when the inverter does not answer ARP at startup
+  (restart or update after sunset, while the inverter is switched off). The
+  bridge now starts immediately and the add-on keeps looking for the inverter
+  every ~30 s, enabling the ARP spoofing and redirect as soon as it wakes up.
+  Previously it stopped for good and nothing restarted it.
+
 ## 0.3.0 - 2026-11-08
 
 ### Changed

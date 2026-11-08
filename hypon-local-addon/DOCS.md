@@ -95,8 +95,10 @@ Everything resumes with the first frame the next morning.
 
 ## Troubleshooting
 
-- **`inverter … did not answer ARP`**: wrong IP, or HA is not on the same L2 segment
-  as the module (a VLAN/router sits between them).
+- **`inverter … does not answer ARP`**: normal at night, the inverter is switched off
+  and the add-on waits for it (the sensors stay available). If it still shows up in
+  daylight: wrong IP, or HA is not on the same L2 segment as the module (a
+  VLAN/router sits between them).
 - **Sensors do not appear** but frames arrive: MQTT issue. Under `host_network`, the
   name `core-mosquitto` is not always resolved; set `mqtt_host` to your Home
   Assistant LAN IP.

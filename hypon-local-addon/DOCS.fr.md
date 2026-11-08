@@ -98,8 +98,10 @@ Tout reprend à la première trame du lendemain matin.
 
 ## Dépannage
 
-- **`inverter … did not answer ARP`** : mauvaise IP, ou HA n'est pas sur le même
-  segment L2 que le module (VLAN/routeur entre les deux).
+- **`inverter … does not answer ARP`** : normal la nuit, l'onduleur est éteint et
+  l'add-on l'attend (les capteurs restent disponibles). Si le message persiste en
+  plein jour : mauvaise IP, ou HA n'est pas sur le même segment L2 que le module
+  (VLAN/routeur entre les deux).
 - **Les capteurs n'apparaissent pas** mais les trames arrivent : problème MQTT. En
   `host_network`, le nom `core-mosquitto` n'est pas toujours résolu ; renseignez
   `mqtt_host` avec l'IP LAN de votre Home Assistant.

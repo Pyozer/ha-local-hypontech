@@ -35,6 +35,8 @@ ETH_P_ARP = 0x0806
 BROADCAST = b"\xff\xff\xff\xff\xff\xff"
 ZERO_MAC = b"\x00\x00\x00\x00\x00\x00"
 ARP_INTERVAL_S = 2.0  # how often we re-assert the spoofed gateway entry
+INVERTER_RETRY_S = 25.0  # pause between ARP lookups while the inverter is unreachable (asleep)
+INVERTER_WARN_EVERY = 20  # repeat the "still waiting" warning every N failed lookups (~10 min)
 
 
 # --------------------------------------------------------------------------- host discovery
@@ -220,20 +222,47 @@ class Interceptor:
         self.sock = open_arp_socket(self.iface)
         LOG.info("interface %s  us %s/%s  gateway %s  inverter %s",
                  self.iface, self.our_ip, fmt_mac(self.our_mac), self.gw_ip, self.inv_ip)
-        self.inv_mac = resolve_mac(self.sock, self.our_mac, self.our_ip, self.inv_ip)
-        if not self.inv_mac:
-            raise SystemExit(f"inverter {self.inv_ip} did not answer ARP; check the IP "
-                             "and that the add-on is on the same L2 network")
+        # The inverter MAC is resolved later (see _wait_for_inverter): the inverter is powered by
+        # the panels and does not answer ARP at night, which must not stop the add-on.
         self.gw_mac = resolve_mac(self.sock, self.our_mac, self.our_ip, self.gw_ip)
-        LOG.info("inverter MAC %s  gateway MAC %s",
-                 fmt_mac(self.inv_mac), fmt_mac(self.gw_mac) if self.gw_mac else "unknown")
+        LOG.info("gateway MAC %s", fmt_mac(self.gw_mac) if self.gw_mac else "unknown")
+
+    async def _wait_for_inverter(self):
+        """Resolve the inverter MAC, retrying for as long as it takes (night, power cut...)."""
+        failures = 0
+        while not self._stop.is_set():
+            mac = await asyncio.to_thread(
+                resolve_mac, self.sock, self.our_mac, self.our_ip, self.inv_ip)
+            if mac:
+                self.inv_mac = mac
+                LOG.info("inverter MAC %s%s", fmt_mac(mac),
+                         f" (answered after {failures} failed lookups)" if failures else "")
+                return True
+            if failures % INVERTER_WARN_EVERY == 0:
+                LOG.warning("inverter %s does not answer ARP: probably switched off (no sun), "
+                            "waiting for it. If it never shows up, check the IP and that the "
+                            "add-on is on the same L2 network.", self.inv_ip)
+            failures += 1
+            try:
+                await asyncio.wait_for(self._stop.wait(), INVERTER_RETRY_S)
+            except asyncio.TimeoutError:
+                pass
+        return False
+
+    async def _intercept(self):
+        """Start spoofing + redirecting as soon as the inverter is reachable."""
+        if not await self._wait_for_inverter():
+            return
+        self.rules = NetRules(self.inv_ip, self.listen_port)
+        self.rules.apply()
+        await self.arp_loop()
 
     def _spoof_frame(self):
         # Tell the inverter: gateway_ip is at OUR mac.
         return build_arp(2, self.our_mac, self.gw_ip, self.inv_mac, self.inv_ip, self.inv_mac)
 
     def _heal_frame(self):
-        if not self.gw_mac:
+        if not self.gw_mac or not self.inv_mac:
             return None
         # Restore the truth: gateway_ip is at the REAL gateway mac.
         return build_arp(2, self.gw_mac, self.gw_ip, self.inv_mac, self.inv_ip, self.inv_mac)
@@ -263,14 +292,13 @@ class Interceptor:
 
     async def run(self):
         self.discover()
-        self.rules = NetRules(self.inv_ip, self.listen_port)
-        self.rules.apply()
-        # The bridge listens on our chosen port; the redirect feeds it.
+        # The bridge listens on our chosen port; the redirect feeds it. It starts right away so
+        # the sensors stay available even while the inverter is asleep.
         os.environ.setdefault("HYPON_LISTEN_HOST", "0.0.0.0")
         os.environ["HYPON_LISTEN_PORT"] = str(self.listen_port)
         cfg = hypon_bridge.Config()
         try:
-            await asyncio.gather(hypon_bridge.main_async(cfg), self.arp_loop())
+            await asyncio.gather(hypon_bridge.main_async(cfg), self._intercept())
         except asyncio.CancelledError:
             pass
         finally:
