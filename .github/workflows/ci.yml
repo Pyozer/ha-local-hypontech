@@ -18,8 +18,8 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install linters
@@ -40,8 +40,8 @@ jobs:
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Byte-compile the sources
@@ -58,10 +58,8 @@ jobs:
   addon-lint:
     name: Add-on manifest lint
     runs-on: ubuntu-latest
-    # Informational until its first green run on this repository; then remove continue-on-error.
-    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: frenck/action-addon-linter@v2.21.2
         with:
           path: ./hypon-local-addon
@@ -70,7 +68,7 @@ jobs:
     name: Image build + tests on the real runtime
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the add-on image (amd64)
         run: |
           base="$(sed -n 's/^  amd64: //p' hypon-local-addon/build.yaml)"
