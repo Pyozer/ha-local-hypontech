@@ -52,7 +52,7 @@ Assistant host network, this add-on:
 | `gateway_ip` | *(auto)* | Gateway IP spoofed towards the module; empty = default gateway detected |
 | `interface` | *(auto)* | Host network interface; empty = detected from the default route |
 | `relay_to_cloud` | `true` | Relay to the Hypon cloud (keeps the app working). `false` = 100% local |
-| `cloud_host` | `gateway-…amazonaws.com` | AWS name of the cloud (avoids a loop). Change only if needed |
+| `cloud_host` | `hk.hypon.cloud` | Hypon cloud host to relay to. Change only if needed |
 | `cloud_port` | `1883` | Cloud port |
 | `listen_port` | `18883` | Local bridge port (redirect target). **Different from 1883** to avoid clashing with Mosquitto |
 | `base_topic` | `hypon` | Prefix of the published state topics |

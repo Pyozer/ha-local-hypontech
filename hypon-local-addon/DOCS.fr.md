@@ -52,7 +52,7 @@ sur le réseau de l'hôte Home Assistant :
 | `gateway_ip` | *(auto)* | IP de la passerelle usurpée vis-à-vis du module ; vide = passerelle par défaut détectée |
 | `interface` | *(auto)* | Interface réseau de l'hôte ; vide = détectée via la route par défaut |
 | `relay_to_cloud` | `true` | Relaie vers le cloud Hypon (laisse l'appli fonctionner). `false` = 100 % local |
-| `cloud_host` | `gateway-…amazonaws.com` | Nom AWS du cloud (évite une boucle). À ne changer que si besoin |
+| `cloud_host` | `hk.hypon.cloud` | Hôte du cloud Hypon vers lequel relayer. À ne changer que si besoin |
 | `cloud_port` | `1883` | Port du cloud |
 | `listen_port` | `18883` | Port local du pont (cible de la redirection). **Différent de 1883** pour ne pas entrer en conflit avec Mosquitto |
 | `base_topic` | `hypon` | Préfixe des topics d'état publiés |

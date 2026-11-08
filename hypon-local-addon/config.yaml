@@ -29,7 +29,7 @@ options:
   gateway_ip: ""
   interface: ""
   relay_to_cloud: true
-  cloud_host: "gateway-be8b19e7047b780f.elb.eu-central-1.amazonaws.com"
+  cloud_host: "hk.hypon.cloud"
   cloud_port: 1883
   listen_port: 18883
   base_topic: "hypon"
