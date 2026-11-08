@@ -53,7 +53,9 @@ The Python is **standard library only** (no third-party dependencies).
 ### Releases
 On every release:
 1. Bump `version` in `hypon-local-addon/config.yaml` (SemVer `MAJOR.MINOR.PATCH`).
-2. Add a matching entry at the top of `CHANGELOG.md` (newest first).
+2. Add a matching entry at the top of `hypon-local-addon/CHANGELOG.md`, newest
+   first (Home Assistant only reads the changelog from the add-on folder; the
+   root `CHANGELOG.md` is a symlink to it, so edit the add-on one).
 3. Commit it, e.g. `chore(release): 0.1.3`, and tag if desired.
 
 ### Local checks
