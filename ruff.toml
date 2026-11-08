@@ -1,0 +1,14 @@
+# Lint configuration for CI (`ruff check .`). Kept deliberately small: real bugs and
+# robustness, not style churn.
+line-length = 110
+target-version = "py312"  # Python shipped by the Home Assistant base image (Alpine 3.22)
+
+[lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "B",        # bugbear (likely bugs)
+    "BLE",      # blind `except Exception` must be explicit (`# noqa: BLE001`)
+    "ASYNC",    # blocking calls inside coroutines
+    "RUF100",   # unused `noqa`
+]

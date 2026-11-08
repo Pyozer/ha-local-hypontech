@@ -1,0 +1,10 @@
+extends: relaxed
+
+rules:
+  line-length: disable   # descriptions in translations are long single-line strings
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false    # GitHub Actions uses `on:` as a key
+
+ignore: |
+  .git/

@@ -32,6 +32,9 @@ On the Home Assistant host network, the add-on:
 | `hypon-local-addon/app/hypon_intercept.py` | Targeted ARP + iptables + lifecycle |
 | `hypon-local-addon/app/hypon_bridge.py` | MQTT bridge: cloud relay + decode + Discovery |
 | `hypon-local-addon/DOCS.md` / `DOCS.fr.md` | User docs (EN / FR) |
+| `tests/` | Test-suite (`unittest`, standard library only): codec, decoding, bridge logic, relay, interceptor, repo conventions |
+| `.github/workflows/ci.yml` | CI: lint, tests on Python 3.12–3.14, add-on lint, image build + tests inside the image |
+| `ruff.toml` / `.yamllint` / `.coveragerc` | Lint and coverage configuration used by CI |
 
 The Python is **standard library only** (no third-party dependencies).
 
@@ -59,8 +62,16 @@ On every release:
 3. Commit it, e.g. `chore(release): 0.1.3`, and tag if desired.
 
 ### Local checks
+CI runs the same checks (`.github/workflows/ci.yml`); run them before pushing.
+- `python3 -m unittest discover -s tests` — the test-suite (it also enforces these
+  conventions: options/translations/docs in sync, `config.yaml` version = top
+  `CHANGELOG.md` entry, standard-library-only imports).
+- `ruff check .` (needs `pip install ruff`) and `shellcheck -e SC2155 hypon-local-addon/run.sh`
 - `python3 -m py_compile hypon-local-addon/app/*.py`
 - `bash -n hypon-local-addon/run.sh`
+
+When changing behaviour, add or update a test. Keep the add-on lightweight: it
+must stay standard-library only and idle at ~0 % CPU / ~25 MB RAM.
 - No real Home Assistant is available in CI; validate the runtime bits (raw ARP
   socket, iptables) on an actual HA OS install.
 

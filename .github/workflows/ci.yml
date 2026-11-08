@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: pip install ruff==0.17.4 yamllint==1.38.0
+      - name: Python (ruff)
+        run: ruff check .
+      - name: Launcher script (shellcheck)
+        # SC2155 (export VAR="$(...)") is the standard idiom in Home Assistant add-ons.
+        run: shellcheck -e SC2155 hypon-local-addon/run.sh
+      - name: YAML (yamllint)
+        run: yamllint .
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Byte-compile the sources
+        run: python -m py_compile hypon-local-addon/app/*.py
+      - name: Unit and integration tests
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+      - name: Coverage report
+        if: matrix.python-version == '3.12'
+        run: |
+          pip install coverage==7.17.2
+          coverage run -m unittest discover -s tests
+          coverage report
+
+  addon-lint:
+    name: Add-on manifest lint
+    runs-on: ubuntu-latest
+    # Informational until its first green run on this repository; then remove continue-on-error.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: frenck/action-addon-linter@v2.21.2
+        with:
+          path: ./hypon-local-addon
+
+  docker:
+    name: Image build + tests on the real runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the add-on image (amd64)
+        run: |
+          base="$(sed -n 's/^  amd64: //p' hypon-local-addon/build.yaml)"
+          docker build --build-arg "BUILD_FROM=${base}" -t hypon-local:ci hypon-local-addon
+      - name: Modules import inside the image
+        run: |
+          docker run --rm --entrypoint python3 hypon-local:ci \
+            -c "import sys; sys.path.insert(0, '/app'); import hypon_bridge, hypon_intercept; print(sys.version)"
+      - name: Run the test-suite with the image's Python
+        run: |
+          docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "${PWD}:/repo:ro" \
+            --entrypoint python3 hypon-local:ci -W error::ResourceWarning -m unittest discover -s /repo/tests
