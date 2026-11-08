@@ -1,0 +1,9 @@
+[run]
+branch = True
+source = hypon-local-addon/app
+
+[report]
+show_missing = True
+skip_covered = False
+# Not covered by design: raw ARP socket / iptables / signal handling need a real HA host.
+fail_under = 85
