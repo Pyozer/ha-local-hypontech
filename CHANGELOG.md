@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-08
+### Added
+- Name and description for every option in the add-on UI (English and French
+  translations).
+- `inverter_ip` is prefilled with the usual `192.168.1.` prefix as a hint.
+- Early validation of `inverter_ip` and `gateway_ip` with a clear error message
+  instead of a failed ARP lookup.
+
 ## [0.1.2] - 2026-11-08
 ### Fixed
 - Skip writing `ip_forward` when it is already enabled on the host, avoiding a
