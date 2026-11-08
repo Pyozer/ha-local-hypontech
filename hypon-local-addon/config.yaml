@@ -1,5 +1,5 @@
 name: Hypon Local Bridge
-version: "0.1.0"
+version: "0.1.1"
 slug: hypon_local
 description: >-
   Read your Hypon micro-inverter (COM-WF collector, HMS-800W and variants)
@@ -11,8 +11,6 @@ arch:
   - aarch64
   - amd64
   - armv7
-  - armhf
-  - i386
 init: false
 startup: services
 boot: auto
