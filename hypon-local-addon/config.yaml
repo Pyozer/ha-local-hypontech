@@ -23,7 +23,7 @@ privileged:
 services:
   - mqtt:need
 options:
-  inverter_ip: ""
+  inverter_ip: "192.168.1."
   gateway_ip: ""
   interface: ""
   relay_to_cloud: true

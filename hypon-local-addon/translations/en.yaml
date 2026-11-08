@@ -1,0 +1,46 @@
+configuration:
+  inverter_ip:
+    name: Inverter IP address
+    description: "IP address of the micro-inverter's Wi-Fi collector, for example 192.168.1.87. Required. Tip: give it a fixed (reserved) address in your router so it never changes."
+  gateway_ip:
+    name: Gateway IP address
+    description: "Gateway that is impersonated towards the inverter. Leave empty to use the host's default gateway (recommended)."
+  interface:
+    name: Network interface
+    description: "Host network interface used for ARP. Leave empty to detect it automatically (recommended)."
+  relay_to_cloud:
+    name: Relay to the Hypon cloud
+    description: "Keeps the vendor app working by relaying the data to the Hypon cloud. Turn it off for a 100% local setup."
+  cloud_host:
+    name: Hypon cloud host
+    description: "Host the traffic is relayed to. Change it only if Hypon changes its server."
+  cloud_port:
+    name: Hypon cloud port
+    description: "Port of the Hypon cloud MQTT server."
+  listen_port:
+    name: Local bridge port
+    description: "Port the local bridge listens on (target of the redirect). Must be different from 1883 to avoid clashing with Mosquitto."
+  base_topic:
+    name: Base MQTT topic
+    description: "Prefix of the published state topics."
+  discovery_prefix:
+    name: MQTT discovery prefix
+    description: "MQTT Discovery prefix of your Home Assistant. The default is almost always right."
+  publish_raw:
+    name: Publish raw frames
+    description: "Also publish the raw frames as hex on hypon/raw/*. Only useful to help decode unknown fields."
+  mqtt_host:
+    name: MQTT broker host
+    description: "Leave empty to use the broker provided by Home Assistant (recommended). Set only to use a different broker."
+  mqtt_port:
+    name: MQTT broker port
+    description: "Only used when an MQTT broker host is set."
+  mqtt_user:
+    name: MQTT username
+    description: "Only used when an MQTT broker host is set."
+  mqtt_password:
+    name: MQTT password
+    description: "Only used when an MQTT broker host is set."
+  debug:
+    name: Debug logging
+    description: "Verbose logs, useful when reporting a problem."

@@ -28,6 +28,7 @@ On the Home Assistant host network, the add-on:
 | `hypon-local-addon/build.yaml` | Base image per architecture (`BUILD_FROM`) |
 | `hypon-local-addon/Dockerfile` | Image build |
 | `hypon-local-addon/run.sh` | bashio launcher: options -> env, then runs the app |
+| `hypon-local-addon/translations/en.yaml` / `fr.yaml` | Option labels and descriptions shown in the HA UI |
 | `hypon-local-addon/app/hypon_intercept.py` | Targeted ARP + iptables + lifecycle |
 | `hypon-local-addon/app/hypon_bridge.py` | MQTT bridge: cloud relay + decode + Discovery |
 | `hypon-local-addon/DOCS.md` / `DOCS.fr.md` | User docs (EN / FR) |
@@ -39,6 +40,10 @@ The Python is **standard library only** (no third-party dependencies).
 ### Language
 - All code, comments, commit messages and primary docs are in **English**.
 - French docs are provided as `*.fr.md` companions and kept in sync.
+
+### Options
+- Every option in `config.yaml` needs a `name` and a `description` in both
+  `translations/en.yaml` and `translations/fr.yaml`; keep them in sync.
 
 ### Commits
 - Follow [Conventional Commits](https://www.conventionalcommits.org/):

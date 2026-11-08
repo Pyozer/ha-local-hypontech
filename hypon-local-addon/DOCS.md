@@ -48,7 +48,7 @@ Assistant host network, this add-on:
 
 | Option | Default | Purpose |
 |---|---|---|
-| `inverter_ip` | *(required)* | IP of the micro-inverter's Wi-Fi collector |
+| `inverter_ip` | `192.168.1.` | IP of the micro-inverter's Wi-Fi collector. Prefilled with the usual subnet: just add the last number (e.g. `192.168.1.87`) |
 | `gateway_ip` | *(auto)* | Gateway IP spoofed towards the module; empty = default gateway detected |
 | `interface` | *(auto)* | Host network interface; empty = detected from the default route |
 | `relay_to_cloud` | `true` | Relay to the Hypon cloud (keeps the app working). `false` = 100% local |

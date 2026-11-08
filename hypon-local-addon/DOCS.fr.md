@@ -48,7 +48,7 @@ sur le réseau de l'hôte Home Assistant :
 
 | Option | Défaut | Rôle |
 |---|---|---|
-| `inverter_ip` | *(obligatoire)* | IP du collecteur Wi-Fi du micro-onduleur |
+| `inverter_ip` | `192.168.1.` | IP du collecteur Wi-Fi du micro-onduleur. Pré-rempli avec le sous-réseau habituel : il suffit d'ajouter le dernier nombre (ex. `192.168.1.87`) |
 | `gateway_ip` | *(auto)* | IP de la passerelle usurpée vis-à-vis du module ; vide = passerelle par défaut détectée |
 | `interface` | *(auto)* | Interface réseau de l'hôte ; vide = détectée via la route par défaut |
 | `relay_to_cloud` | `true` | Relaie vers le cloud Hypon (laisse l'appli fonctionner). `false` = 100 % local |

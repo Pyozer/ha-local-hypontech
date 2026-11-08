@@ -17,6 +17,7 @@ What it does, on the host network (one flat L2 segment):
 Only the inverter is affected. Nothing else on the network is touched.
 """
 import asyncio
+import ipaddress
 import logging
 import os
 import signal
@@ -197,6 +198,14 @@ class Interceptor:
     def discover(self):
         if not self.inv_ip:
             raise SystemExit("HYPON_INV_IP (inverter IP) is required")
+        for label, value in (("inverter_ip", self.inv_ip), ("gateway_ip", self.gw_ip)):
+            if not value:
+                continue
+            try:
+                ipaddress.IPv4Address(value)
+            except ValueError:
+                raise SystemExit(f"{label} {value!r} is not a valid IPv4 address "
+                                 "(expected something like 192.168.1.87)")
         route_iface, route_gw = default_route()
         if not self.iface:
             self.iface = route_iface

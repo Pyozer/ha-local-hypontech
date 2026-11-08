@@ -1,0 +1,46 @@
+configuration:
+  inverter_ip:
+    name: Adresse IP du micro-onduleur
+    description: "Adresse IP du collecteur Wi-Fi du micro-onduleur, par exemple 192.168.1.87. Obligatoire. Astuce : réservez-lui une adresse fixe dans votre box pour qu'elle ne change jamais."
+  gateway_ip:
+    name: Adresse IP de la passerelle
+    description: "Passerelle usurpée vis-à-vis du micro-onduleur. Laissez vide pour utiliser la passerelle par défaut de l'hôte (recommandé)."
+  interface:
+    name: Interface réseau
+    description: "Interface réseau de l'hôte utilisée pour l'ARP. Laissez vide pour la détecter automatiquement (recommandé)."
+  relay_to_cloud:
+    name: Relayer vers le cloud Hypon
+    description: "Garde l'application du constructeur fonctionnelle en relayant les données vers le cloud Hypon. Désactivez pour un fonctionnement 100 % local."
+  cloud_host:
+    name: Hôte du cloud Hypon
+    description: "Hôte vers lequel le trafic est relayé. À modifier uniquement si Hypon change de serveur."
+  cloud_port:
+    name: Port du cloud Hypon
+    description: "Port du serveur MQTT du cloud Hypon."
+  listen_port:
+    name: Port du pont local
+    description: "Port d'écoute du pont local (cible de la redirection). Doit être différent de 1883 pour ne pas entrer en conflit avec Mosquitto."
+  base_topic:
+    name: Topic MQTT de base
+    description: "Préfixe des topics d'état publiés."
+  discovery_prefix:
+    name: Préfixe MQTT Discovery
+    description: "Préfixe MQTT Discovery de votre Home Assistant. La valeur par défaut convient presque toujours."
+  publish_raw:
+    name: Publier les trames brutes
+    description: "Publie aussi les trames brutes en hexadécimal sur hypon/raw/*. Utile uniquement pour aider à décoder les champs inconnus."
+  mqtt_host:
+    name: Hôte du broker MQTT
+    description: "Laissez vide pour utiliser le broker fourni par Home Assistant (recommandé). À renseigner uniquement pour un autre broker."
+  mqtt_port:
+    name: Port du broker MQTT
+    description: "Utilisé uniquement si un hôte de broker MQTT est renseigné."
+  mqtt_user:
+    name: Utilisateur MQTT
+    description: "Utilisé uniquement si un hôte de broker MQTT est renseigné."
+  mqtt_password:
+    name: Mot de passe MQTT
+    description: "Utilisé uniquement si un hôte de broker MQTT est renseigné."
+  debug:
+    name: Journaux de débogage
+    description: "Journaux détaillés, utiles pour signaler un problème."
