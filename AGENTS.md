@@ -1,0 +1,66 @@
+# AGENTS.md
+
+Guidance for anyone — humans or AI agents — working on this repository.
+
+## What this project is
+
+A custom Home Assistant add-on repository. The add-on **Hypon Local Bridge**
+(`hypon-local-addon/`) reads a Hypon micro-inverter locally and publishes it to
+Home Assistant over MQTT, without touching DNS or the router.
+
+## How it works
+
+On the Home Assistant host network, the add-on:
+
+1. ARP-spoofs **only the inverter** so it believes the gateway is Home Assistant;
+2. redirects the inverter's MQTT port (1883) to a local bridge via `iptables`,
+   forwarding its other traffic normally;
+3. relays the connection to the Hypon cloud (the vendor app keeps working),
+   decodes the frames and publishes sensors via MQTT Discovery;
+4. restores the inverter's ARP cache and removes its rules on shutdown.
+
+## Layout
+
+| Path | Role |
+|---|---|
+| `repository.yaml` | Marks the repo as an HA add-on repository |
+| `hypon-local-addon/config.yaml` | Add-on manifest + options/schema |
+| `hypon-local-addon/build.yaml` | Base image per architecture (`BUILD_FROM`) |
+| `hypon-local-addon/Dockerfile` | Image build |
+| `hypon-local-addon/run.sh` | bashio launcher: options -> env, then runs the app |
+| `hypon-local-addon/app/hypon_intercept.py` | Targeted ARP + iptables + lifecycle |
+| `hypon-local-addon/app/hypon_bridge.py` | MQTT bridge: cloud relay + decode + Discovery |
+| `hypon-local-addon/DOCS.md` / `DOCS.fr.md` | User docs (EN / FR) |
+
+The Python is **standard library only** (no third-party dependencies).
+
+## Conventions
+
+### Language
+- All code, comments, commit messages and primary docs are in **English**.
+- French docs are provided as `*.fr.md` companions and kept in sync.
+
+### Commits
+- Follow [Conventional Commits](https://www.conventionalcommits.org/):
+  `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `build:`, `ci:`, `test:`…
+- Imperative mood, concise subject (~72 chars), optional body explaining *why*.
+
+### Releases
+On every release:
+1. Bump `version` in `hypon-local-addon/config.yaml` (SemVer `MAJOR.MINOR.PATCH`).
+2. Add a matching entry at the top of `CHANGELOG.md` (newest first).
+3. Commit it, e.g. `chore(release): 0.1.3`, and tag if desired.
+
+### Local checks
+- `python3 -m py_compile hypon-local-addon/app/*.py`
+- `bash -n hypon-local-addon/run.sh`
+- No real Home Assistant is available in CI; validate the runtime bits (raw ARP
+  socket, iptables) on an actual HA OS install.
+
+## Requirements / constraints
+
+- Home Assistant OS / Supervised; the add-on needs `host_network` and the
+  `NET_ADMIN` / `NET_RAW` capabilities.
+- HA and the inverter must be on the **same L2 segment** (ARP does not cross a
+  router or a VLAN).
+- The add-on acts only on the configured inverter IP and is fully reversible.
