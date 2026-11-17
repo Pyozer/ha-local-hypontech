@@ -2,7 +2,7 @@
 
 Read the live data of a Hypon micro-inverter **locally** (Wi-Fi collector
 `COM-WF`, inverter `HMS-800W` and variants) and publish it to Home Assistant via
-MQTT Discovery — **without touching DNS, DHCP or your router** — while keeping the
+MQTT Discovery — **without changing your DNS or router settings** — while keeping the
 vendor app working.
 
 > 🇫🇷 Version française : [`DOCS.fr.md`](DOCS.fr.md)
@@ -43,6 +43,16 @@ Assistant host network, this add-on:
    add the URL of the Git repository that contains this add-on.
 2. Install **Hypon Local Bridge**, then open the **Configuration** tab.
 3. Set at least `inverter_ip`, start, and watch the **Log** tab.
+
+### Finding the inverter's IP
+
+Look in daylight (the inverter is offline at night): in your router's device list
+(`Espressif`, `Hypon` or `COM-WF`), or with the one-line scan command in the
+[repository README](https://github.com/Pyozer/ha-local-hypontech#quick-start).
+
+Then **reserve that IP for the inverter in your router's DHCP settings** (static
+lease), so it never changes. If the add-on keeps logging `does not answer ARP` in
+daylight, the IP has probably changed: find it again.
 
 ## Options
 

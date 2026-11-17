@@ -2,7 +2,7 @@
 
 Récupère **localement** les mesures d'un micro-onduleur Hypon (collecteur Wi-Fi
 `COM-WF`, onduleur `HMS-800W` et variantes) et les publie dans Home Assistant via
-MQTT Discovery — **sans toucher au DNS, ni au DHCP, ni à la box**, et en gardant
+MQTT Discovery — **sans modifier le DNS ni les réglages de votre box** — et en gardant
 l'application constructeur fonctionnelle.
 
 > 🇬🇧 English version: [`DOCS.md`](DOCS.md)
@@ -43,6 +43,16 @@ sur le réseau de l'hôte Home Assistant :
    menu ⋮ → Dépôts**, ajoutez l'URL du dépôt Git contenant cet add-on.
 2. Installez **Hypon Local Bridge**, puis ouvrez l'onglet **Configuration**.
 3. Renseignez au minimum `inverter_ip`, démarrez, et surveillez les **Journaux**.
+
+### Trouver l'IP de l'onduleur
+
+Cherchez en journée (l'onduleur est éteint la nuit) : dans la liste des appareils de
+votre box (`Espressif`, `Hypon` ou `COM-WF`), ou avec la commande de scan d'une ligne
+du [README du dépôt](https://github.com/Pyozer/ha-local-hypontech/blob/main/README.fr.md#démarrage-rapide).
+
+Ensuite, **réservez cette IP à l'onduleur dans les réglages DHCP de votre box** (bail
+statique) pour qu'elle ne change jamais. Si l'add-on affiche en boucle
+`does not answer ARP` en plein jour, l'IP a probablement changé : retrouvez-la.
 
 ## Options
 
