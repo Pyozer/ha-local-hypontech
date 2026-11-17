@@ -177,9 +177,9 @@ class NetRulesTests(unittest.TestCase):
         self.assertEqual(len(self.calls()), 6)
 
 
-class DiscoverTests(unittest.TestCase):
+class DiscoverBase(unittest.TestCase):
     def interceptor(self, **env):
-        base = {"HYPON_INV_IP": INV_IP}
+        base = {"HYPON_INV_IPS": INV_IP}
         with mock.patch.dict(os.environ, {**base, **env}, clear=True):
             return hi.Interceptor()
 
@@ -194,13 +194,15 @@ class DiscoverTests(unittest.TestCase):
             interceptor.discover()
         return sock, resolver
 
+
+class DiscoverTests(DiscoverBase):
     def test_missing_inverter_ip(self):
-        with self.assertRaisesRegex(SystemExit, "HYPON_INV_IP"):
-            self.discover(self.interceptor(HYPON_INV_IP=""))
+        with self.assertRaisesRegex(SystemExit, "HYPON_INV_IPS"):
+            self.discover(self.interceptor(HYPON_INV_IPS=""))
 
     def test_invalid_ips_are_rejected_early(self):
-        with self.assertRaisesRegex(SystemExit, "inverter_ip.*not a valid IPv4"):
-            self.discover(self.interceptor(HYPON_INV_IP="192.168.1."))
+        with self.assertRaisesRegex(SystemExit, "inverter_ips.*not a valid IPv4"):
+            self.discover(self.interceptor(HYPON_INV_IPS="192.168.1."))
         with self.assertRaisesRegex(SystemExit, "gateway_ip.*not a valid IPv4"):
             self.discover(self.interceptor(HYPON_GW_IP="router"))
 
@@ -225,18 +227,60 @@ class DiscoverTests(unittest.TestCase):
         it = self.interceptor()
         resolver = mock.Mock(return_value=GW_MAC)
         self.discover(it, resolve=resolver)
-        self.assertIsNone(it.inv_mac)
+        self.assertIsNone(it.inverters[0].mac)
         self.assertEqual(it.gw_mac, GW_MAC)
         self.assertEqual([c.args[3] for c in resolver.call_args_list], [GW_IP])   # gateway only
+
+
+class ParseIpsTests(unittest.TestCase):
+    def test_separators_with_or_without_spaces(self):
+        expected = ["192.168.1.8", "192.168.1.9", "192.168.1.7"]
+        for raw in ("192.168.1.8,192.168.1.9,192.168.1.7", "192.168.1.8, 192.168.1.9 ,192.168.1.7",
+                    "  192.168.1.8 ; 192.168.1.9 ;192.168.1.7,", "192.168.1.8 192.168.1.9\t192.168.1.7"):
+            with self.subTest(raw=raw):
+                self.assertEqual(hi.parse_ips(raw), expected)
+        self.assertEqual(hi.parse_ips("192.168.1.8 192.168.1.9\n192.168.1.7"),
+                         ["192.168.1.8", "192.168.1.9", "192.168.1.7"])
+
+    def test_empty_values_are_ignored(self):
+        self.assertEqual(hi.parse_ips(""), [])
+        self.assertEqual(hi.parse_ips(None), [])
+        self.assertEqual(hi.parse_ips("  , "), [])
+
+
+class MultipleInvertersDiscoverTests(DiscoverBase):
+    INV2 = "192.168.1.88"
+
+    def test_every_listed_ip_becomes_an_inverter_in_order(self):
+        it = self.interceptor(HYPON_INV_IPS=f"{INV_IP}, {self.INV2},192.168.1.89")
+        self.assertEqual([i.ip for i in it.inverters], [INV_IP, self.INV2, "192.168.1.89"])
+
+    def test_an_invalid_ip_in_the_list_is_rejected_early(self):
+        with self.assertRaisesRegex(SystemExit, "inverter_ips.*not a valid IPv4"):
+            self.discover(self.interceptor(HYPON_INV_IPS=f"{INV_IP}, 192.168.1."))
+
+    def test_the_same_ip_listed_twice_is_rejected_early(self):
+        for raw in (f"{INV_IP}, {INV_IP}", f"{INV_IP},{self.INV2} ,{INV_IP}"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(
+                    SystemExit, f"inverter_ips lists {INV_IP} more than once"):
+                self.discover(self.interceptor(HYPON_INV_IPS=raw))
+
+    def test_only_the_gateway_is_resolved_at_discovery(self):
+        it = self.interceptor(HYPON_INV_IPS=f"{INV_IP}, {self.INV2}")
+        resolver = mock.Mock(return_value=GW_MAC)
+        self.discover(it, resolve=resolver)
+        self.assertEqual([c.args[3] for c in resolver.call_args_list], [GW_IP])
+        self.assertEqual([i.mac for i in it.inverters], [None, None])
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.sock = FakeSock()
-        with mock.patch.dict(os.environ, {"HYPON_INV_IP": INV_IP}, clear=True):
+        with mock.patch.dict(os.environ, {"HYPON_INV_IPS": INV_IP}, clear=True):
             self.it = hi.Interceptor()
         self.it.sock, self.it.our_mac, self.it.our_ip = self.sock, OUR_MAC, OUR_IP
         self.it.gw_ip, self.it.gw_mac = GW_IP, GW_MAC
+        self.inv = self.it.inverters[0]
         for name, value in (("INVERTER_RETRY_S", 0.01), ("ARP_INTERVAL_S", 0.01)):
             patcher = mock.patch.object(hi, name, value)
             patcher.start()
@@ -265,7 +309,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_waits_until_the_inverter_answers_then_spoofs_and_redirects(self):
         with self.inverter_wakes_up_after(3):
             task = asyncio.create_task(self.it._intercept())
-            await wait_until(lambda: self.it.inv_mac == INV_MAC)
+            await wait_until(lambda: self.inv.mac == INV_MAC)
             await wait_until(lambda: len(self.sock.sent) >= 2)
         self.assertEqual(len(self.rules), 1)
         self.assertTrue(self.rules[0].applied)
@@ -284,16 +328,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rules, [])
 
     async def test_spoof_frame_says_the_gateway_is_us(self):
-        self.it.inv_mac = INV_MAC
-        frame = self.it._spoof_frame()
+        self.inv.mac = INV_MAC
+        frame = self.it._spoof_frame(self.inv)
         self.assertEqual(frame[0:6], INV_MAC)
         self.assertEqual(frame[22:28], OUR_MAC)
         self.assertEqual(frame[28:32], socket.inet_aton(GW_IP))
         self.assertEqual(frame[38:42], socket.inet_aton(INV_IP))
 
     async def test_heal_frame_restores_the_real_gateway_mac(self):
-        self.it.inv_mac = INV_MAC
-        frame = self.it._heal_frame()
+        self.inv.mac = INV_MAC
+        frame = self.it._heal_frame(self.inv)
         self.assertEqual(frame[22:28], GW_MAC)
         self.assertEqual(frame[28:32], socket.inet_aton(GW_IP))
         self.it.heal()
@@ -302,20 +346,80 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_heal_is_a_noop_without_known_macs(self):
         self.it.heal()                          # inverter MAC unknown (asleep all along)
-        self.it.inv_mac, self.it.gw_mac = INV_MAC, None
+        self.inv.mac, self.it.gw_mac = INV_MAC, None
         self.it.heal()                          # gateway MAC unknown
         self.assertEqual(self.sock.sent, [])
 
     async def test_arp_loop_keeps_going_when_a_send_fails_and_stops_on_request(self):
-        self.it.inv_mac = INV_MAC
+        self.inv.mac = INV_MAC
         self.sock.fail_send = True
-        task = asyncio.create_task(self.it.arp_loop())
+        task = asyncio.create_task(self.it.arp_loop(self.inv))
         await asyncio.sleep(0.05)
         self.assertFalse(task.done())           # OSError did not kill the loop
         self.sock.fail_send = False
         await wait_until(lambda: len(self.sock.sent) >= 2)
         self.it.request_stop()
         await asyncio.wait_for(task, 3)
+
+    def two_inverters(self):
+        with mock.patch.dict(os.environ, {"HYPON_INV_IPS": f"{INV_IP}, 192.168.1.88"},
+                             clear=True):
+            self.it.inverters = hi.Interceptor().inverters
+        self.inv, self.inv2 = self.it.inverters
+        self.inv2_mac = bytes.fromhex("010203040506")
+
+    def only_inv2_asleep(self, asleep_ip):
+        macs = {INV_IP: INV_MAC, "192.168.1.88": self.inv2_mac}
+        return mock.patch.object(hi, "resolve_mac", side_effect=lambda _s, _m, _i, ip, **k:
+                                 None if ip == asleep_ip else macs[ip])
+
+    async def test_each_inverter_gets_its_own_spoofing_and_rules(self):
+        self.two_inverters()
+        with self.only_inv2_asleep(None):
+            task = asyncio.create_task(self.it._intercept())
+            await wait_until(lambda: len(self.rules) == 2)
+            await wait_until(lambda: {f[0:6] for f in self.sock.sent} == {INV_MAC, self.inv2_mac})
+        self.assertEqual(sorted(r.args for r in self.rules), [(INV_IP, 18883), ("192.168.1.88", 18883)])
+        self.assertTrue(all(r.applied for r in self.rules))
+        self.assertEqual([i.mac for i in self.it.inverters], [INV_MAC, self.inv2_mac])
+        self.it.request_stop()
+        await asyncio.wait_for(task, 3)
+
+    async def test_a_sleeping_inverter_does_not_hold_back_the_others(self):
+        self.two_inverters()
+        with self.only_inv2_asleep("192.168.1.88"):
+            task = asyncio.create_task(self.it._intercept())
+            await wait_until(lambda: len(self.rules) == 1 and self.sock.sent)
+            self.assertEqual(self.rules[0].args, (INV_IP, 18883))
+            self.assertIsNone(self.inv2.mac)
+            self.assertEqual({f[0:6] for f in self.sock.sent}, {INV_MAC})  # nothing sent to the sleeper
+            self.it.request_stop()
+            await asyncio.wait_for(task, 3)
+
+    async def test_heal_restores_every_known_inverter(self):
+        self.two_inverters()
+        self.inv.mac, self.inv2.mac = INV_MAC, self.inv2_mac
+        self.it.heal()
+        self.assertEqual(len(self.sock.sent), 10)
+        for inv in (self.inv, self.inv2):
+            frames = [f for f in self.sock.sent if f[38:42] == socket.inet_aton(inv.ip)]
+            self.assertEqual(len(frames), 5)
+            self.assertEqual(frames[0][22:28], GW_MAC)
+
+    async def test_rules_are_reverted_last_in_first_out(self):
+        self.patch_run_environment()
+        self.two_inverters()
+        order = []
+        with mock.patch.object(hi, "resolve_mac", side_effect=lambda _s, _m, _i, ip, **k:
+                               INV_MAC if ip == INV_IP else self.inv2_mac):
+            task = asyncio.create_task(self.it.run())
+            await wait_until(lambda: len(self.rules) == 2 and all(r.applied for r in self.rules))
+            for rule in self.rules:
+                rule.revert = lambda rule=rule: order.append(rule.args[0])
+            applied = [r.args[0] for r in self.rules]
+            task.cancel()
+            await asyncio.wait_for(task, 3)
+        self.assertEqual(order, applied[::-1])
 
     def patch_run_environment(self):
         """Make Interceptor.run() testable: no real discovery, no real bridge."""
@@ -324,7 +428,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bridge(_cfg):
             self.bridge_started.set()
             await asyncio.Event().wait()
-        for patcher in (mock.patch.dict(os.environ, {"HYPON_INV_IP": INV_IP}, clear=True),
+        for patcher in (mock.patch.dict(os.environ, {"HYPON_INV_IPS": INV_IP}, clear=True),
                         mock.patch.object(hi.Interceptor, "discover", lambda _self: None),
                         mock.patch.object(hi.hypon_bridge, "main_async", fake_bridge)):
             patcher.start()

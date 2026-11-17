@@ -61,9 +61,11 @@ grâce à son adresse MAC. Faites-le sur la box, pas sur l'onduleur.
 ### 3. Installer et démarrer
 
 Dans la Boutique, ouvrez **Hypon Local Bridge** → **Installer** → onglet
-**Configuration**, renseignez l'IP dans `inverter_ip`, puis démarrez l'add-on et
+**Configuration**, renseignez l'IP dans `inverter_ips`, puis démarrez l'add-on et
 surveillez l'onglet **Journaux**. Un appareil *Hypontech* avec ses capteurs apparaît
-ensuite dans **Paramètres → Appareils et services → MQTT**.
+ensuite dans **Paramètres → Appareils et services → MQTT**. Avec plusieurs
+micro-onduleurs, listez toutes leurs IP dans `inverter_ips`, séparées par des
+virgules : chacun obtient son propre appareil.
 
 **Ça ne marche pas ?** En plein jour, `does not answer ARP` dans les journaux indique
 une mauvaise IP (refaites l'étape 2) ou un autre réseau/VLAN. Plus d'aide dans le

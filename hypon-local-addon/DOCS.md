@@ -42,7 +42,7 @@ Assistant host network, this add-on:
 1. In Home Assistant: **Settings → Add-ons → Add-on Store → ⋮ menu → Repositories**,
    add the URL of the Git repository that contains this add-on.
 2. Install **Hypon Local Bridge**, then open the **Configuration** tab.
-3. Set at least `inverter_ip`, start, and watch the **Log** tab.
+3. Set at least `inverter_ips`, start, and watch the **Log** tab.
 
 ### Finding the inverter's IP
 
@@ -54,11 +54,19 @@ Then **reserve that IP for the inverter in your router's DHCP settings** (static
 lease), so it never changes. If the add-on keeps logging `does not answer ARP` in
 daylight, the IP has probably changed: find it again.
 
+### Several micro-inverters
+
+List all their IPs in `inverter_ips`, separated by commas (e.g.
+`192.168.1.87, 192.168.1.88`; then restart the add-on. Each micro-inverter gets its own *Hypontech* device in
+Home Assistant, identified by its serial number, so nothing is mixed up. Adding one
+never changes the entities of the others, and one going to sleep does not affect the
+rest. All of them must be on the same network as Home Assistant.
+
 ## Options
 
 | Option | Default | Purpose |
 |---|---|---|
-| `inverter_ip` | `192.168.1.` | IP of the micro-inverter's Wi-Fi collector. Prefilled with the usual subnet: just add the last number (e.g. `192.168.1.87`) |
+| `inverter_ips` | `192.168.1.` | IP of the micro-inverter's Wi-Fi collector, or several separated by commas (see *Several micro-inverters*). Prefilled with the usual subnet: just add the last number (e.g. `192.168.1.87`) |
 | `gateway_ip` | *(auto)* | Gateway IP spoofed towards the module; empty = default gateway detected |
 | `interface` | *(auto)* | Host network interface; empty = detected from the default route |
 | `relay_to_cloud` | `true` | Relay to the Hypon cloud (keeps the app working). `false` = 100% local |

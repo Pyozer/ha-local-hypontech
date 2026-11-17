@@ -202,6 +202,54 @@ class OfflineHandlingTests(BridgeTestCase):
         self.assertIn(SN, self.bridge.connected)
 
 
+SN2 = "P08280A023B00178"
+
+
+class MultipleInvertersTests(BridgeTestCase):
+    async def frame_of(self, sn, session=None, **kwargs):
+        await self.bridge.on_device_publish(
+            "invmonitor", support.build_monitor(sn=sn, **kwargs), "test", session)
+
+    def state_of(self, sn):
+        return json.loads(self.mqtt.last(f"hypon/{sn}/state")[0])
+
+    async def test_each_inverter_has_its_own_topics_device_and_unique_ids(self):
+        await self.frame_of(SN, power=100)
+        await self.frame_of(SN2, power=200)
+        self.assertEqual((self.state_of(SN)["power"], self.state_of(SN2)["power"]), (100, 200))
+        for sn in (SN, SN2):
+            cfg = json.loads(self.mqtt.last(f"homeassistant/sensor/hypon_{sn}/power/config")[0])
+            self.assertEqual(cfg["unique_id"], f"hypon_{sn}_power")
+            self.assertEqual(cfg["state_topic"], f"hypon/{sn}/state")
+            self.assertEqual(cfg["device"]["identifiers"], [f"hypon_{sn}"])
+        self.assertEqual(self.mqtt.count(prefix="homeassistant/"), 2 * (len(hb.SENSORS) + 1))
+
+    async def test_a_disconnect_only_affects_the_inverters_of_that_connection(self):
+        first, second = set(), set()
+        await self.frame_of(SN, first, power=100)
+        await self.frame_of(SN2, second, power=200)
+        await self.bridge.on_device_gone(first)
+        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
+        await asyncio.sleep(self.cfg.offline_grace_s * 3)
+        self.assertEqual(self.mqtt.last(f"hypon/{SN2}/connection"), ("ON", True))
+        self.assertEqual(self.state_of(SN2)["power"], 200)
+        self.assertEqual(self.bridge.connected, {SN2})
+
+    async def test_a_connection_that_never_sent_a_frame_marks_nobody_offline(self):
+        await self.frame_of(SN)
+        await self.bridge.on_device_gone(set())
+        await asyncio.sleep(self.cfg.offline_grace_s * 3)
+        self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("ON", True))
+
+    async def test_the_session_collects_the_serials_seen_on_a_connection(self):
+        session = set()
+        await self.frame_of(SN, session)
+        await self.frame_of(SN2, session)
+        await self.bridge.on_device_publish("offinvmonitor", support.build_monitor(sn="P0000000000000X1"),
+                                            "test", session)    # buffered frames are not live
+        self.assertEqual(session, {SN, SN2})
+
+
 class OtherTopicsTests(BridgeTestCase):
     async def test_buffered_frames_are_published_unretained_and_do_not_touch_state(self):
         await self.bridge.on_device_publish("offinvmonitor", support.build_monitor(power=77), "test")

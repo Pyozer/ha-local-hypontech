@@ -14,12 +14,15 @@ What it does, on the host network (one flat L2 segment):
 3. Runs the existing hypon_bridge (relay to the real cloud + decode + MQTT Discovery).
 4. On shutdown, heals the inverter's ARP cache and removes every rule it added.
 
-Only the inverter is affected. Nothing else on the network is touched.
+One or several inverters can be handled (HYPON_INV_IPS, comma separated): each one gets its
+own ARP spoofing and its own rules, all feeding the same bridge, which tells them apart by serial
+number. Only the inverters are affected. Nothing else on the network is touched.
 """
 import asyncio
 import ipaddress
 import logging
 import os
+import re
 import signal
 import socket
 import struct
@@ -37,6 +40,13 @@ ZERO_MAC = b"\x00\x00\x00\x00\x00\x00"
 ARP_INTERVAL_S = 2.0  # how often we re-assert the spoofed gateway entry
 INVERTER_RETRY_S = 25.0  # pause between ARP lookups while the inverter is unreachable (asleep)
 INVERTER_WARN_EVERY = 20  # repeat the "still waiting" warning every N failed lookups (~10 min)
+
+
+# --------------------------------------------------------------------------- configuration
+
+def parse_ips(raw):
+    """IPs from comma / space / newline separated text, in order (duplicates are kept: see discover)."""
+    return [part for part in re.split(r"[\s,;]+", raw or "") if part]
 
 
 # --------------------------------------------------------------------------- host discovery
@@ -183,24 +193,33 @@ class NetRules:
 
 # --------------------------------------------------------------------------- orchestration
 
+class Inverter:
+    """One intercepted inverter: its address, its MAC once known, and its netfilter rules."""
+
+    def __init__(self, ip):
+        self.ip = ip
+        self.mac = None
+        self.rules = None
+
+
 class Interceptor:
     def __init__(self):
-        self.inv_ip = os.environ.get("HYPON_INV_IP", "").strip()
+        self.inverters = [Inverter(ip) for ip in parse_ips(os.environ.get("HYPON_INV_IPS"))]
+        self._applied = []  # inverters whose rules are in place, in the order they were applied
         self.gw_ip = os.environ.get("HYPON_GW_IP", "").strip()
         self.iface = os.environ.get("HYPON_IFACE", "").strip()
         self.listen_port = int(os.environ.get("HYPON_LISTEN_PORT", "18883"))
         self.sock = None
         self.our_mac = None
         self.our_ip = None
-        self.inv_mac = None
         self.gw_mac = None
-        self.rules = None
         self._stop = asyncio.Event()
 
     def discover(self):
-        if not self.inv_ip:
-            raise SystemExit("HYPON_INV_IP (inverter IP) is required")
-        for label, value in (("inverter_ip", self.inv_ip), ("gateway_ip", self.gw_ip)):
+        if not self.inverters:
+            raise SystemExit("HYPON_INV_IPS (inverter IPs) is required")
+        checks = [("inverter_ips", inv.ip) for inv in self.inverters] + [("gateway_ip", self.gw_ip)]
+        for label, value in checks:
             if not value:
                 continue
             try:
@@ -208,6 +227,12 @@ class Interceptor:
             except ValueError:
                 raise SystemExit(f"{label} {value!r} is not a valid IPv4 address "
                                  "(expected something like 192.168.1.87)") from None
+        seen = set()
+        for inv in self.inverters:
+            if inv.ip in seen:
+                raise SystemExit(f"inverter_ips lists {inv.ip} more than once: "
+                                 "list each micro-inverter once")
+            seen.add(inv.ip)
         route_iface, route_gw = default_route()
         if not self.iface:
             self.iface = route_iface
@@ -218,30 +243,31 @@ class Interceptor:
         if not self.gw_ip:
             raise SystemExit("could not determine the gateway IP; set 'gateway_ip'")
         self.our_mac = iface_mac(self.iface)
-        self.our_ip = our_ip_towards(self.inv_ip)
+        self.our_ip = our_ip_towards(self.inverters[0].ip)
         self.sock = open_arp_socket(self.iface)
-        LOG.info("interface %s  us %s/%s  gateway %s  inverter %s",
-                 self.iface, self.our_ip, fmt_mac(self.our_mac), self.gw_ip, self.inv_ip)
-        # The inverter MAC is resolved later (see _wait_for_inverter): the inverter is powered by
+        LOG.info("interface %s  us %s/%s  gateway %s  inverter%s %s",
+                 self.iface, self.our_ip, fmt_mac(self.our_mac), self.gw_ip,
+                 "s" if len(self.inverters) > 1 else "", ", ".join(inv.ip for inv in self.inverters))
+        # The inverter MACs are resolved later (see _wait_for_inverter): an inverter is powered by
         # the panels and does not answer ARP at night, which must not stop the add-on.
         self.gw_mac = resolve_mac(self.sock, self.our_mac, self.our_ip, self.gw_ip)
         LOG.info("gateway MAC %s", fmt_mac(self.gw_mac) if self.gw_mac else "unknown")
 
-    async def _wait_for_inverter(self):
+    async def _wait_for_inverter(self, inv):
         """Resolve the inverter MAC, retrying for as long as it takes (night, power cut...)."""
         failures = 0
         while not self._stop.is_set():
             mac = await asyncio.to_thread(
-                resolve_mac, self.sock, self.our_mac, self.our_ip, self.inv_ip)
+                resolve_mac, self.sock, self.our_mac, self.our_ip, inv.ip)
             if mac:
-                self.inv_mac = mac
-                LOG.info("inverter MAC %s%s", fmt_mac(mac),
+                inv.mac = mac
+                LOG.info("inverter %s MAC %s%s", inv.ip, fmt_mac(mac),
                          f" (answered after {failures} failed lookups)" if failures else "")
                 return True
             if failures % INVERTER_WARN_EVERY == 0:
                 LOG.warning("inverter %s does not answer ARP: probably switched off (no sun), "
                             "waiting for it. If it never shows up, check the IP and that the "
-                            "add-on is on the same L2 network.", self.inv_ip)
+                            "add-on is on the same L2 network.", inv.ip)
             failures += 1
             try:
                 await asyncio.wait_for(self._stop.wait(), INVERTER_RETRY_S)
@@ -250,25 +276,30 @@ class Interceptor:
         return False
 
     async def _intercept(self):
-        """Start spoofing + redirecting as soon as the inverter is reachable."""
-        if not await self._wait_for_inverter():
+        """Each inverter is handled on its own: one that sleeps never holds back the others."""
+        await asyncio.gather(*(self._intercept_one(inv) for inv in self.inverters))
+
+    async def _intercept_one(self, inv):
+        """Start spoofing + redirecting as soon as this inverter is reachable."""
+        if not await self._wait_for_inverter(inv):
             return
-        self.rules = NetRules(self.inv_ip, self.listen_port)
-        self.rules.apply()
-        await self.arp_loop()
+        inv.rules = NetRules(inv.ip, self.listen_port)
+        inv.rules.apply()
+        self._applied.append(inv)
+        await self.arp_loop(inv)
 
-    def _spoof_frame(self):
+    def _spoof_frame(self, inv):
         # Tell the inverter: gateway_ip is at OUR mac.
-        return build_arp(2, self.our_mac, self.gw_ip, self.inv_mac, self.inv_ip, self.inv_mac)
+        return build_arp(2, self.our_mac, self.gw_ip, inv.mac, inv.ip, inv.mac)
 
-    def _heal_frame(self):
-        if not self.gw_mac or not self.inv_mac:
+    def _heal_frame(self, inv):
+        if not self.gw_mac or not inv.mac:
             return None
         # Restore the truth: gateway_ip is at the REAL gateway mac.
-        return build_arp(2, self.gw_mac, self.gw_ip, self.inv_mac, self.inv_ip, self.inv_mac)
+        return build_arp(2, self.gw_mac, self.gw_ip, inv.mac, inv.ip, inv.mac)
 
-    async def arp_loop(self):
-        frame = self._spoof_frame()
+    async def arp_loop(self, inv):
+        frame = self._spoof_frame(inv)
         while not self._stop.is_set():
             try:
                 self.sock.send(frame)
@@ -280,15 +311,16 @@ class Interceptor:
                 pass
 
     def heal(self):
-        frame = self._heal_frame()
-        if not frame:
-            return
-        for _ in range(5):
-            try:
-                self.sock.send(frame)
-            except OSError:
-                break
-        LOG.info("inverter ARP cache restored to the real gateway")
+        for inv in self.inverters:
+            frame = self._heal_frame(inv)
+            if not frame:
+                continue
+            for _ in range(5):
+                try:
+                    self.sock.send(frame)
+                except OSError:
+                    break
+            LOG.info("inverter %s ARP cache restored to the real gateway", inv.ip)
 
     async def run(self):
         self.discover()
@@ -304,8 +336,10 @@ class Interceptor:
         finally:
             self._stop.set()
             self.heal()
-            if self.rules:
-                self.rules.revert()
+            # Last in, first out: the first inverter applied is the one that may have enabled
+            # ip_forward, so it must be the last to put it back.
+            for inv in reversed(self._applied):
+                inv.rules.revert()
             if self.sock:
                 self.sock.close()
 

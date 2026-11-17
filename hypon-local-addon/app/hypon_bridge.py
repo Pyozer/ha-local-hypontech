@@ -344,14 +344,17 @@ class Bridge:
 
     # ----- data handling
 
-    async def on_device_publish(self, topic, payload, origin):
+    async def on_device_publish(self, topic, payload, origin, session=None):
+        """`session` collects the inverter S/Ns seen on one collector connection (see handle_client)."""
         base = self.cfg.base_topic
         try:
             if topic == "invmonitor":
                 data = decode_monitor(payload)
                 sn = data["inverter_sn"]
-                LOG.info("%s P=%sW PV1=%sV/%sA PV2=%sV/%sA grid=%sV %sHz T=%s°C E=%skWh",
-                         data["device_time"], data["power"], data["pv1_voltage"],
+                if session is not None:
+                    session.add(sn)
+                LOG.info("%s %s P=%sW PV1=%sV/%sA PV2=%sV/%sA grid=%sV %sHz T=%s°C E=%skWh",
+                         sn, data["device_time"], data["power"], data["pv1_voltage"],
                          data["pv1_current"], data["pv2_voltage"], data["pv2_current"],
                          data["grid_voltage"], data["grid_frequency"], data["temperature"],
                          data["energy_total"])
@@ -431,11 +434,15 @@ class Bridge:
         # Clear the per-inverter availability topic used by versions <= 0.2.0 (retained "offline").
         await self.local.publish(f"{base}/{sn}/availability", "", retain=True)
 
-    async def on_device_gone(self):
-        """The collector's TCP session ended. Do not flag the inverter offline right away: at dusk
-        it drops and reconnects repeatedly. Wait the grace period, then check nothing came back."""
+    async def on_device_gone(self, serials=None):
+        """A collector's TCP session ended. Do not flag its inverter offline right away: at dusk
+        it drops and reconnects repeatedly. Wait the grace period, then check nothing came back.
+
+        `serials` are the inverters seen on that connection: the others are left alone, so one
+        inverter going to sleep never affects its neighbours. None = every connected inverter."""
         since = time.monotonic()
-        for sn in list(self.connected):
+        gone = self.connected if serials is None else self.connected & set(serials)
+        for sn in list(gone):
             pending = self.offline_tasks.pop(sn, None)
             if pending:
                 pending.cancel()
@@ -464,14 +471,14 @@ class Bridge:
         LOG.info("inverter %s offline for %ss: production zeroed, totals kept",
                  sn, self.cfg.offline_grace_s)
 
-    async def tap(self, first_byte, body, origin):
+    async def tap(self, first_byte, body, origin, session=None):
         ptype = first_byte >> 4
         if ptype == 1:
             client_id, username = parse_connect(body)
             LOG.info("collector CONNECT client_id=%s username=%r (%s)", client_id, username, origin)
         elif ptype == 3:
             topic, _qos, _pid, payload = parse_publish(first_byte, body)
-            await self.on_device_publish(topic, payload, origin)
+            await self.on_device_publish(topic, payload, origin, session)
         elif ptype == 8:
             LOG.info("collector SUBSCRIBE (%s)", origin)
 
@@ -490,6 +497,7 @@ class Bridge:
     async def handle_client(self, reader, writer):
         peer = writer.get_extra_info("peername")
         LOG.info("collector connected from %s", peer)
+        session = set()  # S/Ns of the inverters heard on this connection
         upstream = None
         if self.cfg.upstream_enabled:
             try:
@@ -500,9 +508,9 @@ class Bridge:
                 LOG.warning("cloud unreachable (%s): answering locally", exc)
         try:
             if upstream:
-                await self._relay(reader, writer, *upstream)
+                await self._relay(reader, writer, *upstream, session=session)
             else:
-                await self._serve_locally(reader, writer)
+                await self._serve_locally(reader, writer, session=session)
         except Exception as exc:  # noqa: BLE001
             LOG.warning("session error: %s", exc)
         finally:
@@ -510,9 +518,9 @@ class Bridge:
                 if w:
                     w.close()
             LOG.info("collector %s disconnected", peer)
-            await self.on_device_gone()
+            await self.on_device_gone(session)
 
-    async def _relay(self, c_reader, c_writer, u_reader, u_writer):
+    async def _relay(self, c_reader, c_writer, u_reader, u_writer, session=None):
         async def pump(src, dst, on_packet):
             parser = MqttStreamParser()
             while True:
@@ -529,7 +537,7 @@ class Bridge:
                     parser = MqttStreamParser()
 
         tasks = [
-            asyncio.create_task(pump(c_reader, u_writer, lambda f, b: self.tap(f, b, "relayed"))),
+            asyncio.create_task(pump(c_reader, u_writer, lambda f, b: self.tap(f, b, "relayed", session))),
             asyncio.create_task(pump(u_reader, c_writer, self.tap_cloud)),
         ]
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -539,7 +547,7 @@ class Bridge:
             if t.exception():
                 raise t.exception()
 
-    async def _serve_locally(self, reader, writer):
+    async def _serve_locally(self, reader, writer, session=None):
         parser = MqttStreamParser()
         watchdog = asyncio.create_task(self._cloud_watchdog(writer)) if self.cfg.upstream_enabled else None
         try:
@@ -554,7 +562,7 @@ class Bridge:
                     if reply:
                         writer.write(reply)
                         await writer.drain()
-                    await self.tap(first_byte, body, "local")
+                    await self.tap(first_byte, body, "local", session)
         finally:
             if watchdog:
                 watchdog.cancel()

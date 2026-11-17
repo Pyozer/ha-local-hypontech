@@ -1,7 +1,7 @@
 configuration:
-  inverter_ip:
-    name: Adresse IP du micro-onduleur
-    description: "Adresse IP du collecteur Wi-Fi du micro-onduleur, par exemple 192.168.1.87. Obligatoire. Astuce : réservez-lui une adresse fixe dans votre box pour qu'elle ne change jamais."
+  inverter_ips:
+    name: Adresse(s) IP du ou des micro-onduleurs
+    description: "Adresse IP du collecteur Wi-Fi du micro-onduleur, par exemple 192.168.1.87. Obligatoire. Avec plusieurs micro-onduleurs, listez-les tous séparés par des virgules (par exemple 192.168.1.87, 192.168.1.88). Astuce : réservez à chacun une adresse fixe dans votre box pour qu'elle ne change jamais."
   gateway_ip:
     name: Adresse IP de la passerelle
     description: "Passerelle usurpée vis-à-vis du micro-onduleur. Laissez vide pour utiliser la passerelle par défaut de l'hôte (recommandé)."

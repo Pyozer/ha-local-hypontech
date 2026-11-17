@@ -1,7 +1,7 @@
 configuration:
-  inverter_ip:
-    name: Inverter IP address
-    description: "IP address of the micro-inverter's Wi-Fi collector, for example 192.168.1.87. Required. Tip: give it a fixed (reserved) address in your router so it never changes."
+  inverter_ips:
+    name: Micro-inverter IP address(es)
+    description: "IP address of the micro-inverter's Wi-Fi collector, for example 192.168.1.87. Required. With several micro-inverters, list them all separated by commas (for example 192.168.1.87, 192.168.1.88). Tip: give each one a fixed (reserved) address in your router so it never changes."
   gateway_ip:
     name: Gateway IP address
     description: "Gateway that is impersonated towards the inverter. Leave empty to use the host's default gateway (recommended)."

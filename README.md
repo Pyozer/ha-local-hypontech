@@ -59,9 +59,10 @@ Do it on the router, not on the inverter.
 ### 3. Install and start
 
 In the Add-on Store, open **Hypon Local Bridge** → **Install** → **Configuration** tab,
-enter the IP in `inverter_ip`, then start the add-on and watch the **Log** tab. A
+enter the IP in `inverter_ips`, then start the add-on and watch the **Log** tab. A
 *Hypontech* device with its sensors then appears under **Settings → Devices & Services
-→ MQTT**.
+→ MQTT**. With several micro-inverters, list all their IPs in `inverter_ips`,
+separated by commas: each one gets its own device.
 
 **It doesn't work?** In daylight, `does not answer ARP` in the log means a wrong IP
 (redo step 2) or a different network/VLAN. More help in the add-on

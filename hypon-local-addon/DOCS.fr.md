@@ -42,7 +42,7 @@ sur le réseau de l'hôte Home Assistant :
 1. Dans Home Assistant : **Paramètres → Modules complémentaires → Boutique →
    menu ⋮ → Dépôts**, ajoutez l'URL du dépôt Git contenant cet add-on.
 2. Installez **Hypon Local Bridge**, puis ouvrez l'onglet **Configuration**.
-3. Renseignez au minimum `inverter_ip`, démarrez, et surveillez les **Journaux**.
+3. Renseignez au minimum `inverter_ips`, démarrez, et surveillez les **Journaux**.
 
 ### Trouver l'IP de l'onduleur
 
@@ -54,11 +54,20 @@ Ensuite, **réservez cette IP à l'onduleur dans les réglages DHCP de votre box
 statique) pour qu'elle ne change jamais. Si l'add-on affiche en boucle
 `does not answer ARP` en plein jour, l'IP a probablement changé : retrouvez-la.
 
+### Plusieurs micro-onduleurs
+
+Listez toutes leurs IP dans `inverter_ips`, séparées par des virgules (ex.
+`192.168.1.87, 192.168.1.88` ; puis redémarrez l'add-on. Chaque micro-onduleur obtient son
+propre appareil *Hypontech* dans Home Assistant, identifié par son numéro de série :
+rien n'est mélangé. En ajouter un ne change pas les entités des autres, et l'un qui
+s'endort n'affecte pas les autres. Tous doivent être sur le même réseau que Home
+Assistant.
+
 ## Options
 
 | Option | Défaut | Rôle |
 |---|---|---|
-| `inverter_ip` | `192.168.1.` | IP du collecteur Wi-Fi du micro-onduleur. Pré-rempli avec le sous-réseau habituel : il suffit d'ajouter le dernier nombre (ex. `192.168.1.87`) |
+| `inverter_ips` | `192.168.1.` | IP du collecteur Wi-Fi du micro-onduleur, ou plusieurs séparées par des virgules (voir *Plusieurs micro-onduleurs*). Pré-rempli avec le sous-réseau habituel : il suffit d'ajouter le dernier nombre (ex. `192.168.1.87`) |
 | `gateway_ip` | *(auto)* | IP de la passerelle usurpée vis-à-vis du module ; vide = passerelle par défaut détectée |
 | `interface` | *(auto)* | Interface réseau de l'hôte ; vide = détectée via la route par défaut |
 | `relay_to_cloud` | `true` | Relaie vers le cloud Hypon (laisse l'appli fonctionner). `false` = 100 % local |

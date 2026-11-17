@@ -3,7 +3,7 @@
 set -e
 
 # --- interception ---------------------------------------------------------
-export HYPON_INV_IP="$(bashio::config 'inverter_ip')"
+export HYPON_INV_IPS="$(bashio::config 'inverter_ips')"
 export HYPON_GW_IP="$(bashio::config 'gateway_ip')"
 export HYPON_IFACE="$(bashio::config 'interface')"
 export HYPON_LISTEN_PORT="$(bashio::config 'listen_port')"
@@ -51,9 +51,9 @@ else
     bashio::log.warning "No MQTT broker: sensors will not be published (cloud relay only)."
 fi
 
-if ! bashio::config.has_value 'inverter_ip'; then
-    bashio::exit.nok "Set 'inverter_ip' (the micro-inverter IP) before starting."
+if ! bashio::config.has_value 'inverter_ips'; then
+    bashio::exit.nok "Set 'inverter_ips' (the micro-inverter IP, or several separated by commas) before starting."
 fi
 
-bashio::log.info "Starting Hypon interception for ${HYPON_INV_IP}"
+bashio::log.info "Starting Hypon interception"
 exec python3 /app/hypon_intercept.py
