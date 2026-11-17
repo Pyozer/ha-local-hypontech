@@ -1,5 +1,5 @@
 name: Hypon Local Bridge
-version: "0.3.2"
+version: "0.4.0"
 slug: hypon_local
 description: >-
   Read your Hypon micro-inverter (COM-WF collector, HMS-800W and variants)

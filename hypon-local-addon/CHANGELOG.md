@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0 - 2026-11-17
+
+### Added
+- Support for several micro-inverters. Each one is intercepted on its own (ARP
+  spoofing and `iptables` rules) and appears as its own *Hypontech* device in
+  Home Assistant, identified by its serial number. One going to sleep does not
+  affect the others.
+- Startup checks on the IP list: invalid addresses and duplicates are refused
+  with a clear message.
+
+### Changed
+- **Breaking:** the `inverter_ip` option is renamed `inverter_ips`. It takes one
+  IP or several separated by commas (spaces optional), e.g.
+  `192.168.1.87, 192.168.1.88`. Existing installations must set it again after
+  updating, otherwise the add-on will not start.
+
+### Fixed
+- A dropped collector connection no longer marks every inverter as offline, only
+  the ones seen on that connection.
+
+### Documentation
+- Step-by-step quick start in the README, with a more reliable command to find
+  the inverter's IP and a tip to reserve it in the router.
+
 ## 0.3.2 - 2026-11-08
 
 ### Changed
