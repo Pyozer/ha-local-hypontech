@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 - 2026-11-22
+
+### Added
+- An icon and a logo for the add-on, shown by Home Assistant in the add-on list and on
+  the add-on page.
+
+### Documentation
+- State that this is an unofficial, community project, not affiliated with Hypontech
+  (READMEs and add-on docs).
+
 ## 0.5.0 - 2026-11-22
 
 Home Assistant now only shows what the add-on can vouch for: a silent inverter that is off
