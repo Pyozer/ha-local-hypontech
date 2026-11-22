@@ -8,6 +8,11 @@ Hypon micro-inverter (`COM-WF` collector, `HMS-800W` and variants) **locally**,
 publishing (MQTT Discovery) and transparent relaying to the Hypon cloud (the vendor
 app keeps working).
 
+> **Unofficial project.** This add-on is an independent, community project. It is not
+> affiliated with, endorsed by or supported by Hypontech. Product and company names
+> belong to their respective owners and are used here only to say which devices the
+> add-on works with.
+
 ## Requirements
 
 - Home Assistant OS / Supervised.

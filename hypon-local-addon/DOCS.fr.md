@@ -202,3 +202,8 @@ L'add-on n'agit que sur **votre** matériel, sur **votre** réseau, et vise **la
 IP du micro-onduleur**. Il ne s'attaque pas au cloud : il ne fait que relayer le
 trafic que le module émet déjà. À l'arrêt, le réseau revient exactement à son état
 initial.
+
+**Produit non officiel.** Cet add-on est un projet communautaire indépendant, ni
+affilié à Hypontech, ni approuvé ou soutenu par elle. Les noms de produits et
+d'entreprises appartiennent à leurs propriétaires respectifs et ne sont utilisés que
+pour indiquer les appareils compatibles.

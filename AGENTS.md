@@ -36,6 +36,8 @@ On the Home Assistant host network, the add-on:
 | `hypon-local-addon/app/hypon_bridge.py` | MQTT bridge: cloud relay + decode + Discovery + per-inverter status |
 | `hypon-local-addon/app/hypon_status.py` | Pure rules: what an inverter's silence means (`online` / `sleeping` / `unreachable` / `ip_changed`) |
 | `hypon-local-addon/app/hypon_store.py` | Persistent state in `/data` (atomic, throttled) |
+| `hypon-local-addon/icon.png` / `logo.png` | Add-on icon (128x128) and logo (250x100) shown by Home Assistant |
+| `assets/` | Editable SVG sources of the icon and logo (the PNGs are exported from them) |
 | `hypon-local-addon/DOCS.md` / `DOCS.fr.md` | User docs (EN / FR) |
 | `tests/` | Test-suite (`unittest`, standard library only): codec, decoding, bridge logic, relay, interceptor, repo conventions |
 | `docker-compose.yaml` / `dev/` | Run the checks (lint, tests, coverage) in a clean container: `Dockerfile`, `check.sh`, `requirements.txt` (tool versions, also used by CI) |
@@ -49,6 +51,11 @@ The Python is **standard library only** (no third-party dependencies).
 ### Language
 - All code, comments, commit messages and primary docs are in **English**.
 - French docs are provided as `*.fr.md` companions and kept in sync.
+
+### Artwork and trademarks
+- The project is **unofficial**: the READMEs and the docs say so, keep it that way.
+- The icon and logo are original. Never use Hypontech's logo or artwork. Home Assistant only
+  reads PNGs: edit the SVG in `assets/`, export it at the same size (128x128 / 250x100).
 
 ### Options
 - Every option in `config.yaml` needs a `name` and a `description` in both

@@ -8,6 +8,11 @@ lecture **locale** des données d'un micro-onduleur Hypon (collecteur `COM-WF`,
 publication automatique dans Home Assistant (MQTT Discovery) et relais transparent vers
 le cloud Hypon (l'appli constructeur continue de fonctionner).
 
+> **Projet non officiel.** Cet add-on est un projet communautaire indépendant. Il n'est
+> ni affilié à Hypontech, ni approuvé ou soutenu par elle. Les noms de produits et
+> d'entreprises appartiennent à leurs propriétaires respectifs et ne sont utilisés ici
+> que pour indiquer les appareils compatibles.
+
 ## Prérequis
 
 - Home Assistant OS / Supervised.

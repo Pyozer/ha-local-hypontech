@@ -193,3 +193,7 @@ The add-on only acts on **your** hardware, on **your** network, and targets the
 **single IP of the micro-inverter**. It does not attack the cloud: it merely relays
 the traffic the module already sends. On shutdown, the network returns to exactly its
 previous state.
+
+**Not an official product.** This add-on is an independent, community project, not
+affiliated with, endorsed by or supported by Hypontech. Product and company names
+belong to their respective owners and are used only to say which devices it works with.
