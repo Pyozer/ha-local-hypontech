@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.5.0 - 2026-11-22
+
+Home Assistant now only shows what the add-on can vouch for: a silent inverter that is off
+reads 0 W, one that is lost is unavailable, and a frozen value never stays on screen.
+
+### Fixed
+- **A stale value could stay on screen for hours.** The last production (e.g. 87 W)
+  was kept as long as the add-on had not seen the inverter disconnect, which never
+  happens after a power cut or a restart: the broker kept the retained value while the
+  inverter, back under another IP address, was talking to nobody. Silence is now
+  detected by the clock, whatever the connection does.
+
+### Added
+- **Status** diagnostic sensor per inverter: `online`, `sleeping`, `unreachable` or
+  `ip_changed`. See *Night, silence and availability* in the docs.
+- Telling an inverter that is off (night, storm, shade: **0 W**, entities stay available)
+  from one that is lost (**unavailable**) with what the network says, not the sun: an
+  inverter that answers ARP is not off, and one whose MAC address shows up under another
+  IP is reported `ip_changed`, with its new address. While an inverter does not answer,
+  the add-on asks the addresses of the local network who they are (ARP) to find it
+  again: at once, then after 30 s, 1 min, 2 min, then every 5 min, so a night of silence
+  stays quiet.
+- Diagnostic sensors **Dernière trame** (time of the last frame), **Adresse IP** (where
+  the inverter really is), **Adresse IP configurée** (where the add-on expects it, so an
+  automation can compare the two) and **Adresse MAC** (disabled by default).
+- The add-on remembers the inverters it served and their MAC address in `/data`, so a
+  restart no longer leaves stale retained values behind.
+- The entities are published again whenever the MQTT broker reconnects.
+
+### Changed
+- **Breaking:** measurements become *unavailable* when the inverter is `unreachable` or
+  `ip_changed` (they used to keep the last value forever). When it is off they still
+  read 0 W and stay available. The production is also `null` on the
+  `<base_topic>/<sn>/state` topic in those two statuses.
+- **Breaking:** `offline_grace` is now the silence tolerated before the network is
+  looked at to conclude (it is no longer counted from a dropped connection), and is
+  extended automatically for an inverter that reports slowly (three times its usual
+  period).
+- The `<base_topic>/<sn>/availability` topic is back, now `online` / `offline`
+  depending on whether the measurements can be trusted; measurement entities depend on
+  it and on the add-on's own status.
+- `<base_topic>/<sn>/state` carries a `last_seen` timestamp.
+
+### Upgrading
+- The first start after the update has no memory of the previous run: a value retained
+  by the previous version stays on screen until the inverter reports (or until the
+  silence is concluded as above). Nothing to do.
+
 ## 0.4.0 - 2026-11-17
 
 ### Added
