@@ -38,6 +38,7 @@ On the Home Assistant host network, the add-on:
 | `hypon-local-addon/app/hypon_store.py` | Persistent state in `/data` (atomic, throttled) |
 | `hypon-local-addon/DOCS.md` / `DOCS.fr.md` | User docs (EN / FR) |
 | `tests/` | Test-suite (`unittest`, standard library only): codec, decoding, bridge logic, relay, interceptor, repo conventions |
+| `docker-compose.yaml` / `dev/` | Run the checks (lint, tests, coverage) in a clean container: `Dockerfile`, `check.sh`, `requirements.txt` (tool versions, also used by CI) |
 | `.github/workflows/ci.yml` | CI: lint, tests on Python 3.12–3.14, add-on lint, image build + tests inside the image |
 | `ruff.toml` / `.yamllint` / `.coveragerc` | Lint and coverage configuration used by CI |
 
@@ -68,6 +69,14 @@ On every release:
 
 ### Local checks
 CI runs the same checks (`.github/workflows/ci.yml`); run them before pushing.
+
+**Easiest, nothing to install but Docker:** `docker compose run --rm check` runs the lint and
+the tests (with coverage) in a clean container, the sources mounted read-only. Any single tool
+can be run on its own, e.g. `docker compose run --rm check yamllint .`. It does not cover the
+add-on manifest lint nor the add-on image build, which only run in CI. The versions of the
+tools (ruff, yamllint, coverage) live in `dev/requirements.txt`, shared by the CI workflow and
+`dev/Dockerfile`. The same checks, one by one:
+
 - `python3 -m unittest discover -s tests` — the test-suite (it also enforces these
   conventions: options/translations/docs in sync, `config.yaml` version = top
   `CHANGELOG.md` entry, standard-library-only imports).

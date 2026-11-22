@@ -1,0 +1,11 @@
+# Repository checks in a clean container, nothing to install on the host:
+#
+#   docker compose run --rm check                lint, tests and coverage
+#   docker compose run --rm check yamllint .     or any single tool
+#
+# The sources are mounted read-only: a check can never modify the working tree.
+services:
+  check:
+    build: dev
+    volumes:
+      - .:/repo:ro
