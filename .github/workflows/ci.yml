@@ -23,12 +23,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install linters
-        run: pip install ruff==0.17.4 yamllint==1.38.0
+        run: pip install -r dev/requirements.txt
       - name: Python (ruff)
         run: ruff check .
-      - name: Launcher script (shellcheck)
+      - name: Shell scripts (shellcheck)
         # SC2155 (export VAR="$(...)") is the standard idiom in Home Assistant add-ons.
-        run: shellcheck -e SC2155 hypon-local-addon/run.sh
+        run: shellcheck -e SC2155 hypon-local-addon/run.sh dev/check.sh
       - name: YAML (yamllint)
         run: yamllint .
 
@@ -51,7 +51,7 @@ jobs:
       - name: Coverage report
         if: matrix.python-version == '3.12'
         run: |
-          pip install coverage==7.17.2
+          pip install -r dev/requirements.txt
           coverage run -m unittest discover -s tests
           coverage report
 
