@@ -2,6 +2,7 @@
 import ast
 import os
 import re
+import struct
 import sys
 import unittest
 
@@ -137,6 +138,30 @@ class ReleaseTests(unittest.TestCase):
         root = os.path.join(ROOT, "CHANGELOG.md")
         self.assertTrue(os.path.islink(root))
         self.assertEqual(os.path.realpath(root), os.path.realpath(os.path.join(ADDON, "CHANGELOG.md")))
+
+
+def png_size(path):
+    """(width, height) of a PNG file, read from its header."""
+    with open(path, "rb") as f:
+        header = f.read(24)
+    assert header[:8] == b"\x89PNG\r\n\x1a\n", f"{path} is not a PNG"
+    return struct.unpack(">II", header[16:24])
+
+
+class ArtworkTests(unittest.TestCase):
+    """Home Assistant shows icon.png in the add-on list and logo.png on its page: it only reads
+    PNGs, with these proportions."""
+
+    def test_icon_is_a_128_pixel_square_png(self):
+        self.assertEqual(png_size(os.path.join(ADDON, "icon.png")), (128, 128))
+
+    def test_logo_is_a_png_with_the_250_by_100_proportions(self):
+        width, height = png_size(os.path.join(ADDON, "logo.png"))
+        self.assertEqual(width * 100, height * 250)
+
+    def test_the_editable_sources_are_kept(self):
+        for name in ("icon.svg", "logo.svg"):
+            self.assertTrue(os.path.isfile(os.path.join(ROOT, "assets", name)), name)
 
 
 class SourceTests(unittest.TestCase):

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Hypon Local Bridge</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e4570"/><stop offset="1" stop-color="#0c2035"/></linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <circle cx="64" cy="64" r="23" fill="#ffb400"/>
+  <polyline points="64.00,31.00 64.00,21.00" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="87.33,40.67 94.41,33.59" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="97.00,64.00 107.00,64.00" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="87.33,87.33 94.41,94.41" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="64.00,97.00 64.00,107.00" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="40.67,87.33 33.59,94.41" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="31.00,64.00 21.00,64.00" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="40.67,40.67 33.59,33.59" fill="none" stroke="#ffb400" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon points="67.15,47.20 54.55,66.10 61.90,66.10 59.80,80.80 73.45,59.80 66.10,59.80" fill="#0c2035" stroke="#0c2035" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>
