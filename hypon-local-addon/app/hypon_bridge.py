@@ -511,7 +511,7 @@ class Bridge:
             await asyncio.sleep(WATCH_INTERVAL_S)
             try:
                 await self.refresh()
-            except Exception:  # noqa: BLE001 - the watchdog must outlive any surprise
+            except Exception:  # the watchdog must outlive any surprise (logged below)
                 LOG.exception("availability check failed")
 
     async def refresh(self):

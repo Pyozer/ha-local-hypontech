@@ -3,7 +3,7 @@ import json
 import os
 import unittest
 
-import support  # noqa: F401  (puts the add-on sources on sys.path)
+import support  # (also puts the add-on sources on sys.path)
 
 import hypon_store as hst
 from hypon_store import StateStore

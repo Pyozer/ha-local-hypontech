@@ -1,11 +1,12 @@
 """Interceptor: ARP helpers, netfilter rules, inverter discovery and lifecycle."""
 import asyncio
+import itertools
 import os
 import socket
 import unittest
 from unittest import mock
 
-import support  # noqa: F401  (puts the add-on sources on sys.path)
+import support  # (also puts the add-on sources on sys.path)
 from support import wait_until
 
 import hypon_intercept as hi
@@ -756,7 +757,7 @@ class SweepScheduleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_silent_night_settles_at_one_search_every_five_minutes(self):
         times = await self.sweeps_until(8 * 3600)
-        gaps = [b - a for a, b in zip(times, times[1:])]
+        gaps = [b - a for a, b in itertools.pairwise(times)]
         self.assertEqual(gaps[:4], [30, 60, 120, 300])
         self.assertEqual(set(gaps[3:]), {300})
         self.assertLess(len(times), 8 * 3600 / 300 + 5)         # about 100, not 240
