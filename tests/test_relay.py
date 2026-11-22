@@ -3,9 +3,12 @@ import asyncio
 import json
 import struct
 import unittest
+from datetime import datetime, timezone
 
 import support
 from support import SN, hb, make_config, wait_until
+
+from hypon_status import Link
 
 
 class RelayTestCase(unittest.IsolatedAsyncioTestCase):
@@ -23,9 +26,6 @@ class RelayTestCase(unittest.IsolatedAsyncioTestCase):
             await self.listener.wait_closed()
         if self.cloud:
             await self.cloud.close()
-        if hasattr(self, "bridge"):
-            for task in list(self.bridge.offline_tasks.values()):
-                task.cancel()
 
     async def start_cloud(self, port=None):
         async def answer(data, writer):
@@ -43,8 +43,11 @@ class RelayTestCase(unittest.IsolatedAsyncioTestCase):
         env = {"HYPON_UPSTREAM_HOST": "127.0.0.1", "HYPON_UPSTREAM_PORT": str(upstream_port),
                "HYPON_PUBLISH_RAW": "off", **env}
         self.cfg = make_config(**env)
-        self.cfg.offline_grace_s = 0.05
-        self.bridge = hb.Bridge(self.cfg, self.mqtt)
+        self.cfg.offline_grace_s = 300
+        # A clock the test moves itself: no sleeping, no flakiness.
+        self.clock = support.FakeClock(datetime(2026, 6, 21, 10, 0, tzinfo=timezone.utc))
+        self.bridge = hb.Bridge(self.cfg, self.mqtt, mono=self.clock.mono, wall=self.clock.wall)
+        self.clock.advance(hb.STARTUP_HOLD_S + 1)   # the add-on has been running for a while
         self.listener = await asyncio.start_server(self.bridge.handle_client, "127.0.0.1", 0)
         return self.listener.sockets[0].getsockname()[1]
 
@@ -99,16 +102,31 @@ class CloudRelayTests(RelayTestCase):
         await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/state") is not None)
         self.assertEqual(self.state()["power"], 11)                      # parser recovered
 
-    async def test_collector_disconnect_goes_offline_after_the_grace_period(self):
+    async def test_a_dropped_connection_alone_changes_nothing_the_silence_that_follows_does(self):
         cloud = await self.start_cloud()
         port = await self.start_bridge(cloud.port)
         _reader, writer = await self.collector(port)
         writer.write(support.publish_packet("invmonitor", support.build_monitor(power=9, e_total=12.5)))
         await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/state") is not None)
         writer.close()
-        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
-        self.assertEqual(self.state()["power"], 0)
+        await asyncio.sleep(0.05)                          # let the bridge notice the disconnection
+        await self.bridge.refresh()
+        self.assertEqual(self.mqtt.last(f"hypon/{SN}/status"), ("online", True))   # still trusted
+        self.assertEqual(self.state()["power"], 9)
+        self.bridge.links["127.0.0.1"] = Link(alive=True, checked=True)   # still on the network
+        self.clock.advance(self.cfg.offline_grace_s + 1)    # nothing came back
+        await self.bridge.refresh()
+        self.assertEqual(self.mqtt.last(f"hypon/{SN}/status"), ("unreachable", True))
+        self.assertIsNone(self.state()["power"])
         self.assertAlmostEqual(self.state()["energy_total"], 12.5, places=2)
+
+    async def test_frames_remember_the_address_of_the_collector(self):
+        cloud = await self.start_cloud()
+        port = await self.start_bridge(cloud.port)
+        _reader, writer = await self.collector(port)
+        writer.write(support.publish_packet("invmonitor", support.build_monitor(power=9)))
+        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/network") is not None)
+        self.assertEqual(json.loads(self.mqtt.last(f"hypon/{SN}/network")[0])["ip"], "127.0.0.1")
 
     async def test_cloud_closing_the_connection_closes_the_collector_side(self):
         cloud = await self.start_cloud()

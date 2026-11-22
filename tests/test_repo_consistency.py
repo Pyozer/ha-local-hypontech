@@ -99,7 +99,8 @@ class LauncherTests(unittest.TestCase):
     def setUpClass(cls):
         cls.run_sh = read("run.sh")
         cls.options = section_keys(read("config.yaml"), "options")
-        cls.python = "\n".join(read("app", name) for name in ("hypon_bridge.py", "hypon_intercept.py"))
+        cls.python = "\n".join(read("app", name) for name in sorted(os.listdir(APP))
+                               if name.endswith(".py"))
 
     def test_run_sh_only_reads_declared_options(self):
         used = set(re.findall(r"bashio::config(?:\.\w+)? '(\w+)'", self.run_sh))
@@ -140,7 +141,7 @@ class ReleaseTests(unittest.TestCase):
 
 class SourceTests(unittest.TestCase):
     def test_python_uses_the_standard_library_only(self):
-        local = {"hypon_bridge", "hypon_intercept"}
+        local = {name[:-3] for name in os.listdir(APP) if name.endswith(".py")}
         for name in sorted(os.listdir(APP)):
             if not name.endswith(".py"):
                 continue

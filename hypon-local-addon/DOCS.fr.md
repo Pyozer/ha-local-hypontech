@@ -77,7 +77,7 @@ Assistant.
 | `base_topic` | `hypon` | Préfixe des topics d'état publiés |
 | `discovery_prefix` | `homeassistant` | Préfixe MQTT Discovery |
 | `publish_raw` | `false` | Publie aussi les trames brutes en hex (`hypon/raw/*`) pour poursuivre le décodage |
-| `offline_grace` | `300` | Secondes de silence avant de déclarer l'onduleur hors ligne (voir ci-dessous). `0` = immédiat |
+| `offline_grace` | `300` | Secondes de silence tolérées avant de regarder le réseau pour conclure (éteint ou perdu, voir ci-dessous). Un onduleur qui répond lentement obtient automatiquement plus de temps. `0` = immédiat |
 | `mqtt_host` | *(service HA)* | Broker MQTT manuel ; vide = fourni par Home Assistant |
 | `mqtt_port` / `mqtt_user` / `mqtt_password` | — | Identifiants MQTT manuels (si `mqtt_host` renseigné) |
 | `debug` | `false` | Journaux détaillés |
@@ -90,23 +90,83 @@ réseau de Home Assistant. Laissée vide, elle est détectée automatiquement à
 de la route par défaut de l'hôte. Ne la changez que si votre passerelle réelle n'est
 pas celle détectée.
 
-### Nuit et disponibilité
+### Nuit, silence et disponibilité
 
-Le micro-onduleur et son collecteur Wi-Fi sont alimentés par les panneaux : ils
-s'éteignent au crépuscule et le collecteur peut se déconnecter / se reconnecter
-plusieurs fois autour du coucher du soleil. Les capteurs **restent disponibles** :
-leur disponibilité suit l'add-on lui-même (Last Will MQTT sur
-`<base_topic>/bridge/status`), pas l'onduleur.
+Le micro-onduleur et son collecteur Wi-Fi sont alimentés par les panneaux : sans lumière
+(nuit, orage, ombrage important) ils sont éteints et ne disent rien. Un onduleur dont
+l'adresse IP a changé ne dit rien non plus. Le silence seul est ambigu, et la position du
+soleil ne trancherait pas (le soleil est « levé » pendant un orage). Le **réseau**, lui,
+tranche : un onduleur alimenté répond à l'ARP, à son IP ou, si son adresse a changé, à une
+autre, toujours avec la même adresse MAC ; un onduleur éteint n'est visible nulle part.
+Après `offline_grace` secondes sans trame, l'add-on regarde, et donne à chaque onduleur un
+**statut** :
 
-Quand l'onduleur reste silencieux pendant `offline_grace` secondes :
+| Statut | Signification | Entités |
+|---|---|---|
+| `online` | Des trames arrivent | Valeurs en direct |
+| `sleeping` | Silencieux et **absent du réseau** : éteint faute de lumière | Disponibles, production à **0**, totaux conservés |
+| `unreachable` | Il répond au réseau mais n'envoie rien à l'add-on | **Indisponibles** |
+| `ip_changed` | Silencieux, et son adresse MAC a été vue sous **une autre IP** | **Indisponibles** |
 
-- le capteur binaire de diagnostic **Connexion** passe à *off* ;
-- les valeurs instantanées (puissance, tension/courant/puissance PV, courant
-  réseau) sont mises à `0`, comme le fait le cloud Hypon ;
-- les totaux d'énergie, la température et la tension/fréquence réseau gardent leur
-  dernière valeur.
+Ainsi, la nuit, ou sous un orage en plein jour, l'onduleur affiche **0 W** et jamais
+« indisponible ». Il ne devient indisponible que lorsqu'il y a une preuve positive qu'il
+est vivant mais pas joignable comme configuré.
 
-Tout reprend à la première trame du lendemain matin.
+Comment le réseau est observé : toutes les 30 secondes, l'add-on demande à chaque onduleur
+« es-tu là ? » (ARP). Tant que l'un ne répond pas, il demande aussi à **chaque adresse de
+votre réseau local** (une requête ARP chacune) qui elle est, pour retrouver l'adresse MAC
+de cet onduleur où qu'il soit passé. Il le fait tout de suite, puis après 30 secondes,
+1 minute et 2 minutes, puis seulement toutes les 5 minutes : une nuit de silence coûte une
+recherche toutes les 5 minutes. Cela représente quelques kilo-octets, uniquement pendant
+que l'onduleur est silencieux, et rien ne sort de votre réseau. Dès que l'onduleur répond
+à nouveau, la séquence repart de zéro.
+
+Le rythme habituel d'un onduleur est appris : un onduleur qui répond lentement obtient
+trois fois sa période (jamais moins que `offline_grace`). Le collecteur se déconnecte et se
+reconnecte souvent autour du coucher du soleil : les reconnexions dans le délai ne
+changent rien, ni une connexion coupée à elle seule, seul le silence qui suit compte.
+
+**Pourquoi indisponible et pas 0 W quand il est perdu ?** Un `0` affirmerait que l'onduleur
+ne produit rien, ce qui serait faux. `indisponible` dit honnêtement qu'on ne sait pas, et
+ne laisse jamais une valeur périmée (comme la dernière production avant une coupure de
+courant) à l'écran. Les totaux ne sont pas remis à zéro : ils ne font qu'augmenter et la
+première trame après la panne ramène la bonne valeur.
+
+**Limites.** « Éteint » est déduit de l'absence de l'onduleur sur le réseau : un onduleur
+qui produit mais qu'on **ne voit pas du tout** (son Wi-Fi est coupé, par exemple, ou il est
+sur un autre réseau) affiche donc 0 W. L'add-on ne peut garantir que ce que le réseau lui
+montre. Il lui faut aussi l'adresse MAC de l'onduleur, apprise la première fois qu'il
+l'intercepte ; sans elle (ou si la surveillance ARP ne peut pas tourner), un onduleur
+silencieux est déclaré `unreachable` plutôt que de deviner 0 W.
+
+Tout reprend à la première trame. L'add-on se souvient des onduleurs qu'il servait
+(`/data`) : après un redémarrage ou une coupure de courant, il ne continue donc jamais
+d'afficher une valeur que plus personne ne confirme. Un onduleur qui était en ligne
+dispose d'un délai complet pour se manifester à nouveau, puis les mêmes règles
+s'appliquent.
+
+#### Entités
+
+Chaque onduleur est un appareil *Hypontech* avec ses mesures (puissance, tension /
+courant / puissance PV, réseau, température, énergie) et ces entités de
+**diagnostic**, qui restent disponibles même quand les mesures ne le sont pas, pour
+expliquer pourquoi :
+
+| Entité | Contenu |
+|---|---|
+| **Statut** | `online`, `sleeping`, `unreachable` ou `ip_changed` |
+| **Connexion** | *on* uniquement quand l'onduleur est `online` |
+| **Dernière trame** | Quand la dernière trame est arrivée (horodatage) |
+| **Adresse IP** | Où se trouve réellement l'onduleur : l'adresse depuis laquelle il parle, ou sa nouvelle après un `ip_changed` |
+| **Adresse IP configurée** | L'adresse où l'add-on l'attend (celle de `inverter_ips`) |
+| **Adresse MAC** | Son adresse matérielle (désactivée par défaut, activez-la si besoin) |
+
+Pour être prévenu quand l'adresse change, une automatisation peut se déclencher quand
+**Statut** passe à `ip_changed`, ou comparer les deux adresses, par exemple avec la
+condition template
+`{{ states('sensor.hypon_ip_address') != states('sensor.hypon_configured_ip') }}`
+(adaptez les identifiants d'entités aux vôtres), et mettre la nouvelle adresse dans la
+notification.
 
 ## Vérifier que ça marche
 
@@ -118,9 +178,18 @@ Tout reprend à la première trame du lendemain matin.
 ## Dépannage
 
 - **`inverter … does not answer ARP`** : normal la nuit, l'onduleur est éteint et
-  l'add-on l'attend (les capteurs restent disponibles). Si le message persiste en
-  plein jour : mauvaise IP, ou HA n'est pas sur le même segment L2 que le module
-  (VLAN/routeur entre les deux).
+  l'add-on l'attend. Si le message persiste en plein jour : mauvaise IP, ou HA n'est
+  pas sur le même segment L2 que le module (VLAN/routeur entre les deux).
+- **Statut `ip_changed`** : l'onduleur a reçu une autre adresse (après une coupure de
+  courant, par exemple). Lisez-la dans le capteur **Adresse IP**, renseignez-la dans
+  `inverter_ips`, redémarrez, et réservez-lui une adresse fixe dans votre box pour
+  qu'elle ne bouge plus.
+- **Statut `unreachable`** : l'onduleur est sur le réseau mais son trafic n'atteint plus
+  l'add-on. Redémarrez l'add-on pour refaire l'interception, et vérifiez que
+  `inverter_ips` est correct.
+- **0 W alors que l'onduleur produit** : l'add-on ne le voit pas du tout sur le réseau
+  (voir *Limites* ci-dessus). Vérifiez son Wi-Fi et qu'il est sur le même réseau que
+  Home Assistant.
 - **Les capteurs n'apparaissent pas** mais les trames arrivent : problème MQTT. En
   `host_network`, le nom `core-mosquitto` n'est pas toujours résolu ; renseignez
   `mqtt_host` avec l'IP LAN de votre Home Assistant.

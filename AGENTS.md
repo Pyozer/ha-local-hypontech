@@ -17,6 +17,8 @@ On the Home Assistant host network, the add-on:
    forwarding its other traffic normally;
 3. relays the connection to the Hypon cloud (the vendor app keeps working),
    decodes the frames and publishes sensors via MQTT Discovery;
+   a silent inverter is classified as off (no light: 0 W) or lost (unavailable)
+   from what ARP shows of it (answers / moved / absent), never left on a stale value;
 4. restores the inverter's ARP cache and removes its rules on shutdown.
 
 ## Layout
@@ -30,8 +32,10 @@ On the Home Assistant host network, the add-on:
 | `hypon-local-addon/Dockerfile` | Image build |
 | `hypon-local-addon/run.sh` | bashio launcher: options -> env, then runs the app |
 | `hypon-local-addon/translations/en.yaml` / `fr.yaml` | Option labels and descriptions shown in the HA UI |
-| `hypon-local-addon/app/hypon_intercept.py` | Targeted ARP + iptables + lifecycle |
-| `hypon-local-addon/app/hypon_bridge.py` | MQTT bridge: cloud relay + decode + Discovery |
+| `hypon-local-addon/app/hypon_intercept.py` | Targeted ARP + iptables + lifecycle + `LinkMonitor` (ARP probes and a LAN sweep with backoff: evidence for the bridge) |
+| `hypon-local-addon/app/hypon_bridge.py` | MQTT bridge: cloud relay + decode + Discovery + per-inverter status |
+| `hypon-local-addon/app/hypon_status.py` | Pure rules: what an inverter's silence means (`online` / `sleeping` / `unreachable` / `ip_changed`) |
+| `hypon-local-addon/app/hypon_store.py` | Persistent state in `/data` (atomic, throttled) |
 | `hypon-local-addon/DOCS.md` / `DOCS.fr.md` | User docs (EN / FR) |
 | `tests/` | Test-suite (`unittest`, standard library only): codec, decoding, bridge logic, relay, interceptor, repo conventions |
 | `.github/workflows/ci.yml` | CI: lint, tests on Python 3.12–3.14, add-on lint, image build + tests inside the image |

@@ -33,7 +33,7 @@ class DecodeMonitorTests(unittest.TestCase):
 
     def test_night_frame_is_all_zero_production(self):
         data = hb.decode_monitor(support.build_monitor(e_total=10.0))
-        for key in hb.ZERO_WHEN_OFFLINE:
+        for key in hb.PRODUCTION_KEYS:
             self.assertEqual(data[key], 0, key)
 
     def test_too_short_payload_is_rejected(self):
@@ -83,7 +83,7 @@ class SensorTableTests(unittest.TestCase):
 
     def test_zeroed_keys_are_instantaneous_measurements_only(self):
         by_key = {s[0]: s for s in hb.SENSORS}
-        for key in hb.ZERO_WHEN_OFFLINE:
+        for key in hb.PRODUCTION_KEYS:
             self.assertEqual(by_key[key][4], "measurement", key)  # never a total
 
 

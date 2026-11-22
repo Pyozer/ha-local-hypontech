@@ -1,50 +1,93 @@
-"""Bridge logic: Home Assistant discovery, availability/offline handling, topic handling."""
+"""Bridge logic: Home Assistant discovery, availability statuses, persistence, topic handling."""
 import asyncio
 import json
 import struct
-import time
 import unittest
+from datetime import datetime, timezone
+from unittest import mock
 
 import support
-from support import SN, hb, make_config, wait_until
+from support import SN, hb, make_config
+
+import hypon_status as hs
+from hypon_store import StateStore
+
+START = datetime(2026, 6, 21, 10, 0, tzinfo=timezone.utc)
+GRACE = 300
+IP, NEW_IP, MAC = "192.168.1.87", "192.168.1.140", "aa:bb:cc:dd:ee:ff"
+ABSENT = hs.Link(mac=MAC, checked=True)                 # the network was searched: nothing there
+ALIVE = hs.Link(mac=MAC, alive=True, checked=True)      # it answers the network
+MOVED = hs.Link(mac=MAC, moved_to=NEW_IP, checked=True)  # it is at another address
+PRODUCTION = dict(power=5, pv1=(30.0, 0.2), pv2=(28.0, 0.1), grid_v=229.5, grid_a=0.1,
+                  freq=50.1, temp=18.5, e_total=933.99, e_pv1=500.0, e_pv2=433.99)
+DEFAULT = object()
 
 
 class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.mqtt = support.RecordingMqtt()
         self.cfg = make_config(HYPON_PUBLISH_RAW="off")
-        self.cfg.offline_grace_s = 0.05
-        self.bridge = hb.Bridge(self.cfg, self.mqtt)
+        self.cfg.offline_grace_s = GRACE
+        self.clock = support.FakeClock(START)
+        self.links = {IP: ABSENT}        # by default the network was searched and shows nothing
+        self.store = StateStore()
+        self.bridge = self.make_bridge()
+        # The add-on has been running for a while: the start-up hold is not what is tested here.
+        self.clock.advance(hb.STARTUP_HOLD_S + 1)
 
-    async def asyncTearDown(self):
-        for task in list(self.bridge.offline_tasks.values()):
-            task.cancel()
-        await asyncio.sleep(0)
+    def make_bridge(self, mqtt=None, store=None, cfg=None):
+        return hb.Bridge(cfg or self.cfg, mqtt or self.mqtt, store or self.store, self.links,
+                         mono=self.clock.mono, wall=self.clock.wall)
 
-    async def frame(self, **kwargs):
-        await self.bridge.on_device_publish("invmonitor", support.build_monitor(**kwargs), "test")
+    async def frame(self, sn=SN, session=DEFAULT, **kwargs):
+        """A live frame, by default coming from the inverter at IP (`session=None`: unknown)."""
+        if session is DEFAULT:
+            session = hb.Session(IP)
+        await self.bridge.on_device_publish(
+            "invmonitor", support.build_monitor(sn=sn, **kwargs), "test", session)
 
-    def state(self):
-        return json.loads(self.mqtt.last(f"hypon/{SN}/state")[0])
+    async def silence(self, seconds):
+        """Let `seconds` go by without any frame, then run the watchdog once."""
+        self.clock.advance(seconds)
+        await self.bridge.refresh()
 
-    def config_of(self, kind, key):
-        return json.loads(self.mqtt.last(f"homeassistant/{kind}/hypon_{SN}/{key}/config")[0])
+    def state(self, sn=SN):
+        return json.loads(self.mqtt.last(f"hypon/{sn}/state")[0])
+
+    def status(self, sn=SN):
+        return self.mqtt.last(f"hypon/{sn}/status")[0]
+
+    def availability(self, sn=SN):
+        return self.mqtt.last(f"hypon/{sn}/availability")[0]
+
+    def network(self, sn=SN):
+        return json.loads(self.mqtt.last(f"hypon/{sn}/network")[0])
+
+    def config_of(self, kind, key, sn=SN):
+        return json.loads(self.mqtt.last(f"homeassistant/{kind}/hypon_{sn}/{key}/config")[0])
+
+
+DIAGNOSTICS = (("binary_sensor", "connection"), ("sensor", "status"), ("sensor", "last_seen"),
+               ("sensor", "ip_address"), ("sensor", "configured_ip"), ("sensor", "mac_address"))
 
 
 class DiscoveryTests(BridgeTestCase):
-    async def test_first_frame_publishes_retained_state_and_connection(self):
+    async def test_first_frame_publishes_retained_state_status_and_connection(self):
         await self.frame(power=123, e_total=50.5)
         payload, retain = self.mqtt.last(f"hypon/{SN}/state")
         self.assertTrue(retain)
         self.assertEqual(json.loads(payload)["power"], 123)
         self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("ON", True))
+        self.assertEqual(self.mqtt.last(f"hypon/{SN}/status"), ("online", True))
+        self.assertEqual(self.mqtt.last(f"hypon/{SN}/availability"), ("online", True))
 
-    async def test_one_discovery_config_per_sensor_plus_connection(self):
+    async def test_one_discovery_config_per_sensor_plus_the_diagnostics(self):
         await self.frame()
         for key, *_ in hb.SENSORS:
             self.assertIsNotNone(self.mqtt.last(f"homeassistant/sensor/hypon_{SN}/{key}/config"), key)
-        self.assertIsNotNone(self.mqtt.last(f"homeassistant/binary_sensor/hypon_{SN}/connection/config"))
-        self.assertEqual(self.mqtt.count(prefix="homeassistant/"), len(hb.SENSORS) + 1)
+        for kind, key in DIAGNOSTICS:
+            self.assertIsNotNone(self.mqtt.last(f"homeassistant/{kind}/hypon_{SN}/{key}/config"), key)
+        self.assertEqual(self.mqtt.count(prefix="homeassistant/"), len(hb.SENSORS) + len(DIAGNOSTICS))
         retained = [r for t, _p, r in self.mqtt.published if t.startswith("homeassistant/")]
         self.assertTrue(all(retained))
 
@@ -64,22 +107,56 @@ class DiscoveryTests(BridgeTestCase):
         conn = self.config_of("binary_sensor", "connection")
         self.assertEqual(conn["unique_id"], f"hypon_{SN}_connection")
         self.assertEqual(conn["device_class"], "connectivity")
-        self.assertEqual(conn["entity_category"], "diagnostic")
         self.assertEqual((conn["payload_on"], conn["payload_off"]), ("ON", "OFF"))
         self.assertEqual(conn["state_topic"], f"hypon/{SN}/connection")
+        for kind, key in DIAGNOSTICS:
+            cfg = self.config_of(kind, key)
+            self.assertEqual(cfg["unique_id"], f"hypon_{SN}_{key}")
+            self.assertEqual(cfg["object_id"], f"hypon_{key}")
 
-    async def test_entities_depend_on_the_bridge_not_on_the_inverter(self):
+    async def test_measurements_need_the_bridge_and_a_trustworthy_inverter(self):
         await self.frame()
-        configs = [self.config_of("sensor", k) for k, *_ in hb.SENSORS]
-        configs.append(self.config_of("binary_sensor", "connection"))
-        for cfg in configs:
-            self.assertEqual(cfg["availability_topic"], "hypon/bridge/status")
+        for key, *_ in hb.SENSORS:
+            cfg = self.config_of("sensor", key)
+            self.assertEqual(cfg["availability"], [{"topic": "hypon/bridge/status"},
+                                                   {"topic": f"hypon/{SN}/availability"}])
+            self.assertEqual(cfg["availability_mode"], "all")
+            self.assertNotIn("availability_topic", cfg)
+
+    async def test_diagnostics_only_need_the_bridge_so_they_can_explain_a_problem(self):
+        await self.frame()
+        for kind, key in DIAGNOSTICS:
+            cfg = self.config_of(kind, key)
+            self.assertEqual(cfg["availability_topic"], "hypon/bridge/status", key)
             self.assertNotIn("availability", cfg)
+            self.assertEqual(cfg["entity_category"], "diagnostic", key)
+
+    async def test_status_is_an_enum_listing_every_status(self):
+        await self.frame()
+        cfg = self.config_of("sensor", "status")
+        self.assertEqual(cfg["device_class"], "enum")
+        self.assertEqual(cfg["options"], ["online", "sleeping", "unreachable", "ip_changed"])
+        self.assertEqual(cfg["state_topic"], f"hypon/{SN}/status")
+
+    async def test_last_seen_is_a_timestamp_and_the_network_entities_share_one_topic(self):
+        await self.frame()
+        last_seen = self.config_of("sensor", "last_seen")
+        self.assertEqual(last_seen["device_class"], "timestamp")
+        self.assertEqual(last_seen["state_topic"], f"hypon/{SN}/state")
+        ip, configured, mac = (self.config_of("sensor", key)
+                               for key in ("ip_address", "configured_ip", "mac_address"))
+        self.assertEqual({c["state_topic"] for c in (ip, configured, mac)}, {f"hypon/{SN}/network"})
+        self.assertEqual(ip["value_template"], "{{ value_json.ip or none }}")
+        self.assertEqual(configured["value_template"], "{{ value_json.configured_ip or none }}")
+        self.assertNotIn("enabled_by_default", ip)
+        self.assertNotIn("enabled_by_default", configured)   # meant for automations: on by default
+        self.assertIs(mac["enabled_by_default"], False)      # useful when needed, noise otherwise
 
     async def test_all_entities_share_one_device(self):
         await self.frame()
-        devices = {json.dumps(self.config_of("sensor", k)["device"], sort_keys=True) for k, *_ in hb.SENSORS}
-        devices.add(json.dumps(self.config_of("binary_sensor", "connection")["device"], sort_keys=True))
+        configs = [self.config_of("sensor", k) for k, *_ in hb.SENSORS]
+        configs += [self.config_of(kind, key) for kind, key in DIAGNOSTICS]
+        devices = {json.dumps(cfg["device"], sort_keys=True) for cfg in configs}
         self.assertEqual(len(devices), 1)
         device = json.loads(devices.pop())
         self.assertEqual(device["identifiers"], [f"hypon_{SN}"])
@@ -87,11 +164,6 @@ class DiscoveryTests(BridgeTestCase):
         self.assertEqual(device["serial_number"], SN)
         self.assertEqual(device["model"], "HMS-800W-C")  # default until `invinfo` says otherwise
         self.assertNotIn("sw_version", device)
-
-    async def test_legacy_availability_topic_is_cleared(self):
-        await self.frame()
-        self.assertEqual(self.mqtt.last(f"hypon/{SN}/availability"), ("", True))
-        self.assertNotIn("offline", [p for t, p, _r in self.mqtt.published if t.endswith("/availability")])
 
     async def test_discovery_is_published_once_per_local_connection(self):
         await self.frame()
@@ -101,6 +173,14 @@ class DiscoveryTests(BridgeTestCase):
         await self.bridge._on_local_connect()          # broker (re)connected
         await self.frame(power=3)
         self.assertEqual(self.mqtt.count(prefix="homeassistant/"), 2 * first)
+
+    async def test_everything_is_published_again_when_the_broker_reconnects(self):
+        await self.frame(power=77)
+        self.mqtt.published.clear()
+        await self.bridge._on_local_connect()
+        for leaf in ("state", "status", "connection", "availability", "network"):
+            self.assertIsNotNone(self.mqtt.last(f"hypon/{SN}/{leaf}"), leaf)
+        self.assertEqual(self.state()["power"], 77)
 
     async def test_invinfo_enriches_the_device_and_triggers_a_new_announce(self):
         await self.frame()
@@ -112,142 +192,416 @@ class DiscoveryTests(BridgeTestCase):
         self.assertEqual(device["sw_version"], "H123-45678-90")
         self.assertEqual(device["model"], "HMS-800W-2T")
 
+    async def test_invinfo_alone_announces_nothing(self):
+        await self.bridge.on_device_publish("invinfo", support.build_invinfo(), "test")
+        self.assertEqual(self.mqtt.published, [])
+
     async def test_custom_base_topic_and_discovery_prefix(self):
         cfg = make_config(HYPON_BASE_TOPIC="solar", HA_DISCOVERY_PREFIX="ha", HYPON_PUBLISH_RAW="off")
         self.assertEqual(cfg.status_topic, "solar/bridge/status")
         bridge = hb.Bridge(cfg, self.mqtt)
         await bridge.on_device_publish("invmonitor", support.build_monitor(), "test")
         self.assertIsNotNone(self.mqtt.last(f"solar/{SN}/state"))
-        self.assertIsNotNone(self.mqtt.last(f"ha/sensor/hypon_{SN}/power/config"))
-        self.assertEqual(json.loads(self.mqtt.last(f"ha/sensor/hypon_{SN}/power/config")[0])
-                         ["availability_topic"], "solar/bridge/status")
+        self.assertIsNotNone(self.mqtt.last(f"solar/{SN}/status"))
+        power = json.loads(self.mqtt.last(f"ha/sensor/hypon_{SN}/power/config")[0])
+        self.assertEqual(power["availability"][0], {"topic": "solar/bridge/status"})
+        self.assertEqual(power["availability"][1], {"topic": f"solar/{SN}/availability"})
 
 
-class OfflineHandlingTests(BridgeTestCase):
-    async def test_reconnect_within_grace_never_declares_offline(self):
-        await self.frame(power=5, e_total=900.0)
-        await self.bridge.on_device_gone()
-        await asyncio.sleep(0.01)
-        await self.frame(power=6, e_total=900.0)       # collector is back (dusk flapping)
-        await asyncio.sleep(self.cfg.offline_grace_s * 4)
-        self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("ON", True))
-        self.assertNotIn("OFF", [p for t, p, _r in self.mqtt.published if t.endswith("/connection")])
-        self.assertEqual(self.state()["power"], 6)
-        self.assertEqual(self.bridge.offline_tasks, {})
+class OffTests(BridgeTestCase):
+    """Silent and nowhere on the network: no light on the panels. Its production is really 0 W,
+    whether it is night or a storm, and Home Assistant must say so rather than "unavailable"."""
 
-    async def test_silence_zeroes_production_and_keeps_totals(self):
-        await self.frame(power=5, pv1=(30.0, 0.2), pv2=(28.0, 0.1), grid_v=229.5, grid_a=0.1,
-                         freq=50.1, temp=18.5, e_total=933.99, e_pv1=500.0, e_pv2=433.99)
-        await self.bridge.on_device_gone()
-        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
+    async def test_silence_with_the_inverter_absent_reads_zero_watts_and_stays_available(self):
+        await self.frame(**PRODUCTION)
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "sleeping")
+        self.assertEqual(self.availability(), "online")          # never "unavailable" for this
+        self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("OFF", True))
         state = self.state()
-        for key in hb.ZERO_WHEN_OFFLINE:
+        for key in hb.PRODUCTION_KEYS:
             self.assertEqual(state[key], 0, key)
+        self.assertTrue(self.mqtt.last(f"hypon/{SN}/state")[1])  # retained, survives HA restarts
+
+    async def test_it_does_not_matter_whether_it_is_day_or_night(self):
+        # The same silence at noon (a storm) and at midnight gives the same answer: 0 W.
+        for hour in (0, 12):
+            with self.subTest(hour=hour):
+                self.clock = support.FakeClock(datetime(2026, 6, 21, hour, 0, tzinfo=timezone.utc))
+                self.mqtt = support.RecordingMqtt()
+                self.bridge = self.make_bridge()
+                self.clock.advance(hb.STARTUP_HOLD_S + 1)
+                await self.frame(**PRODUCTION)
+                await self.silence(GRACE + 1)
+                self.assertEqual((self.status(), self.availability(), self.state()["power"]),
+                                 ("sleeping", "online", 0))
+
+    async def test_totals_and_the_other_last_values_are_kept(self):
+        await self.frame(**PRODUCTION)
+        await self.silence(GRACE + 1)
+        state = self.state()
         self.assertAlmostEqual(state["energy_total"], 933.99, places=2)
         self.assertAlmostEqual(state["energy_pv1"], 500.0, places=2)
+        self.assertAlmostEqual(state["energy_pv2"], 433.99, places=2)
         self.assertEqual(state["temperature"], 18.5)
         self.assertEqual(state["grid_voltage"], 229.5)
         self.assertEqual(state["grid_frequency"], 50.1)
         self.assertEqual(state["device_time"], "2026-11-08 17:00:00")
-        self.assertTrue(self.mqtt.last(f"hypon/{SN}/state")[1])  # retained, survives HA restarts
-        self.assertNotIn(SN, self.bridge.connected)
 
-    async def test_sensors_never_become_unavailable_through_the_inverter(self):
+    async def test_the_last_frame_time_is_kept(self):
         await self.frame()
-        await self.bridge.on_device_gone()
-        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
-        published_availability = [(t, p) for t, p, _r in self.mqtt.published if "availability" in t]
-        self.assertEqual(published_availability, [(f"hypon/{SN}/availability", "")])
-        self.assertFalse([t for t in self.mqtt.topics() if t == "hypon/bridge/status"])
+        seen = self.state()["last_seen"]
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.state()["last_seen"], seen)
 
-    async def test_next_morning_frame_restores_online(self):
+    async def test_the_collector_reconnecting_within_the_delay_changes_nothing(self):
+        # Dusk flapping: the collector drops and comes back several times.
         await self.frame(power=5)
-        await self.bridge.on_device_gone()
-        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
+        for _ in range(4):
+            await self.silence(GRACE - 10)
+            await self.frame(power=6)
+        self.assertEqual(self.mqtt.count(f"hypon/{SN}/status"), 1)          # online, once
+        self.assertNotIn("OFF", [p for t, p, _r in self.mqtt.published if t.endswith("/connection")])
+        self.assertEqual(self.state()["power"], 6)
+
+    async def test_the_first_frame_next_morning_brings_it_back(self):
+        await self.frame(power=5)
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "sleeping")
         await self.frame(power=42)
+        self.assertEqual(self.status(), "online")
         self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("ON", True))
+        self.assertEqual(self.availability(), "online")
         self.assertEqual(self.state()["power"], 42)
-        self.assertIn(SN, self.bridge.connected)
 
-    async def test_disconnect_of_an_unknown_inverter_publishes_nothing(self):
-        await self.bridge.on_device_gone()
-        await asyncio.sleep(self.cfg.offline_grace_s * 3)
-        self.assertEqual(self.mqtt.published, [])
-
-    async def test_repeated_disconnects_keep_a_single_pending_task(self):
+    async def test_nothing_is_published_again_while_it_stays_off(self):
         await self.frame()
-        await self.bridge.on_device_gone()
-        await self.bridge.on_device_gone()
-        self.assertEqual(len(self.bridge.offline_tasks), 1)
-        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
-        self.assertEqual(self.mqtt.count(f"hypon/{SN}/connection"), 2)  # ON then a single OFF
+        await self.silence(GRACE + 1)
+        published = len(self.mqtt.published)
+        for _ in range(5):
+            await self.silence(600)
+        self.assertEqual(len(self.mqtt.published), published)
 
-    async def test_zero_grace_goes_offline_immediately(self):
+    async def test_zero_delay_declares_it_silent_at_once(self):
         self.cfg.offline_grace_s = 0
         await self.frame()
-        await self.bridge.on_device_gone()
-        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
-
-    async def test_offline_without_any_known_state_only_flips_the_connection(self):
-        self.bridge.connected.add(SN)
-        await self.bridge._mark_offline(SN)
-        self.assertEqual(self.mqtt.published, [(f"hypon/{SN}/connection", "OFF", True)])
-
-    async def test_a_frame_arriving_during_the_wait_wins_even_if_not_cancelled(self):
-        await self.frame(power=9)
-        # simulate the race: a frame is seen after the disconnect timestamp, task not cancelled
-        self.bridge.last_seen[SN] = time.monotonic() + 1
-        await self.bridge._offline_after_grace(SN, since=time.monotonic())
-        self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("ON", True))
-        self.assertIn(SN, self.bridge.connected)
+        await self.silence(1)
+        self.assertEqual(self.status(), "sleeping")
 
 
-SN2 = "P08280A023B00178"
+class UnreachableTests(BridgeTestCase):
+    """Powered and on the network, yet silent: the data cannot be trusted."""
+
+    async def test_an_inverter_that_answers_the_network_but_not_us_is_unavailable(self):
+        await self.frame(**PRODUCTION)
+        self.links[IP] = ALIVE
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "unreachable")
+        self.assertEqual(self.availability(), "offline")
+        self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("OFF", True))
+
+    async def test_the_last_production_is_never_left_standing(self):
+        # The incident: 87 W shown for hours although nothing came in any more.
+        await self.frame(**{**PRODUCTION, "power": 87})
+        self.links[IP] = ALIVE
+        await self.silence(GRACE + 1)
+        state = self.state()
+        for key in hb.PRODUCTION_KEYS:
+            self.assertIsNone(state[key], key)    # unknown, neither 87 nor a fake 0
+        self.assertAlmostEqual(state["energy_total"], 933.99, places=2)
+
+    async def test_it_comes_back_with_the_next_frame(self):
+        await self.frame(power=87)
+        self.links[IP] = ALIVE
+        await self.silence(GRACE + 1)
+        await self.frame(power=120)
+        self.assertEqual(self.status(), "online")
+        self.assertEqual(self.availability(), "online")
+        self.assertEqual(self.state()["power"], 120)
+
+    async def test_when_the_network_cannot_be_looked_at_it_is_not_claimed_to_be_off(self):
+        # No ARP monitor (or no known MAC): "not seen" would mean nothing, so no 0 W is invented.
+        await self.frame()
+        self.links[IP] = hs.Link(mac=MAC)         # checked=False
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "unreachable")
+
+    async def test_an_inverter_with_an_unknown_address_is_never_taken_for_off(self):
+        await self.frame(session=None)
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "unreachable")
+
+    async def test_a_slow_reporter_is_given_more_time(self):
+        for _ in range(4):                       # a frame every 400 s: threshold becomes 1200 s
+            await self.frame()
+            self.clock.advance(400)
+        self.links[IP] = ALIVE
+        await self.silence(700)                  # 1100 s of silence: past the 300 s grace, not 1200 s
+        self.assertEqual(self.status(), "online")
+        await self.silence(200)
+        self.assertEqual(self.status(), "unreachable")
+
+
+class IpChangedTests(BridgeTestCase):
+    async def silent_inverter(self):
+        await self.frame()
+        self.links[IP] = MOVED
+        await self.silence(GRACE + 1)
+
+    async def test_an_inverter_seen_under_another_ip_is_reported_as_such(self):
+        await self.silent_inverter()
+        self.assertEqual(self.status(), "ip_changed")
+        self.assertEqual(self.availability(), "offline")
+        self.assertIsNone(self.state()["power"])
+
+    async def test_the_new_address_and_the_mac_are_published(self):
+        await self.silent_inverter()
+        self.assertEqual(self.network(), {"ip": NEW_IP, "configured_ip": IP, "mac": MAC})
+
+    async def test_the_warning_tells_what_to_do(self):
+        await self.frame()
+        self.links[IP] = MOVED
+        with support.logging_enabled(), self.assertLogs("hypon", "WARNING") as logs:
+            await self.silence(GRACE + 1)
+        message = logs.records[0].getMessage()
+        self.assertIn(NEW_IP, message)
+        self.assertIn("inverter_ips", message)
+
+    async def test_it_goes_back_to_online_once_the_ip_is_fixed(self):
+        await self.silent_inverter()
+        self.links[IP] = ALIVE
+        await self.frame()
+        self.assertEqual(self.status(), "online")
+        self.assertEqual(self.network()["ip"], IP)
+
+
+class NetworkEntitiesTests(BridgeTestCase):
+    async def test_the_ip_is_the_one_the_frames_come_from(self):
+        await self.frame(session=hb.Session("192.168.1.99"))
+        self.assertEqual(self.network()["ip"], "192.168.1.99")
+
+    async def test_the_mac_comes_from_the_interceptor(self):
+        await self.frame()
+        self.assertEqual(self.network(), {"ip": IP, "configured_ip": IP, "mac": MAC})
+
+    async def test_the_mac_is_unknown_until_the_interceptor_knows_it(self):
+        self.links.clear()
+        await self.frame()
+        self.assertEqual(self.network(), {"ip": IP, "configured_ip": IP, "mac": None})
+
+    async def test_the_configured_ip_is_the_address_the_add_on_expects_the_inverter_at(self):
+        await self.frame(session=hb.Session("192.168.1.99"))
+        self.links["192.168.1.99"] = ABSENT
+        await self.frame(session=hb.Session("192.168.1.99"))
+        self.assertEqual(self.network()["configured_ip"], "192.168.1.99")
+
+    async def test_both_addresses_differ_exactly_when_the_inverter_has_moved(self):
+        # What an automation compares: where it is vs where it is expected.
+        await self.frame()
+        self.assertEqual(self.network()["ip"], self.network()["configured_ip"])
+        self.links[IP] = MOVED
+        await self.silence(GRACE + 1)
+        self.assertEqual((self.network()["ip"], self.network()["configured_ip"]), (NEW_IP, IP))
+        self.links[IP] = ALIVE
+        await self.frame()
+        self.assertEqual(self.network()["ip"], self.network()["configured_ip"])
+
+    async def test_an_address_removed_from_the_options_is_no_longer_called_configured(self):
+        await self.frame(session=hb.Session("192.168.1.99"))     # (no longer in inverter_ips)
+        self.assertEqual(self.network()["ip"], "192.168.1.99")   # still where it was last heard
+        self.assertIsNone(self.network()["configured_ip"])
+
+    async def test_network_is_only_published_when_it_changes(self):
+        for _ in range(4):
+            await self.frame()
+        self.assertEqual(self.mqtt.count(f"hypon/{SN}/network"), 1)
+
+    async def test_without_a_session_the_ip_stays_unknown(self):
+        await self.frame(session=None)
+        self.assertEqual(self.network(), {"ip": None, "configured_ip": None, "mac": None})
+
+
+SN2, IP2 = "P08280A023B00178", "192.168.1.88"
 
 
 class MultipleInvertersTests(BridgeTestCase):
-    async def frame_of(self, sn, session=None, **kwargs):
-        await self.bridge.on_device_publish(
-            "invmonitor", support.build_monitor(sn=sn, **kwargs), "test", session)
+    def setUp(self):
+        super().setUp()
+        self.links[IP2] = ABSENT
 
-    def state_of(self, sn):
-        return json.loads(self.mqtt.last(f"hypon/{sn}/state")[0])
+    async def frame2(self, **kwargs):
+        await self.frame(SN2, session=hb.Session(IP2), **kwargs)
 
     async def test_each_inverter_has_its_own_topics_device_and_unique_ids(self):
-        await self.frame_of(SN, power=100)
-        await self.frame_of(SN2, power=200)
-        self.assertEqual((self.state_of(SN)["power"], self.state_of(SN2)["power"]), (100, 200))
+        await self.frame(power=100)
+        await self.frame2(power=200)
+        self.assertEqual((self.state(SN)["power"], self.state(SN2)["power"]), (100, 200))
         for sn in (SN, SN2):
-            cfg = json.loads(self.mqtt.last(f"homeassistant/sensor/hypon_{sn}/power/config")[0])
+            cfg = self.config_of("sensor", "power", sn)
             self.assertEqual(cfg["unique_id"], f"hypon_{sn}_power")
             self.assertEqual(cfg["state_topic"], f"hypon/{sn}/state")
             self.assertEqual(cfg["device"]["identifiers"], [f"hypon_{sn}"])
-        self.assertEqual(self.mqtt.count(prefix="homeassistant/"), 2 * (len(hb.SENSORS) + 1))
+        self.assertEqual(self.mqtt.count(prefix="homeassistant/"),
+                         2 * (len(hb.SENSORS) + len(DIAGNOSTICS)))
 
-    async def test_a_disconnect_only_affects_the_inverters_of_that_connection(self):
-        first, second = set(), set()
-        await self.frame_of(SN, first, power=100)
-        await self.frame_of(SN2, second, power=200)
-        await self.bridge.on_device_gone(first)
-        await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/connection") == ("OFF", True))
-        await asyncio.sleep(self.cfg.offline_grace_s * 3)
-        self.assertEqual(self.mqtt.last(f"hypon/{SN2}/connection"), ("ON", True))
-        self.assertEqual(self.state_of(SN2)["power"], 200)
-        self.assertEqual(self.bridge.connected, {SN2})
+    async def test_each_inverter_is_judged_on_its_own_silence_and_its_own_network_evidence(self):
+        await self.frame(power=100)
+        await self.frame2(power=200)
+        self.links[IP] = ALIVE                   # the first one answers the network, the second not
+        for _ in range(3):
+            self.clock.advance(GRACE / 2)
+            await self.frame2(power=210)         # only the second one keeps reporting
+        await self.silence(GRACE / 2 + 1)
+        self.assertEqual(self.status(SN), "unreachable")
+        self.assertEqual(self.status(SN2), "online")
+        self.assertEqual(self.state(SN2)["power"], 210)
+        self.assertEqual(self.availability(SN2), "online")
 
-    async def test_a_connection_that_never_sent_a_frame_marks_nobody_offline(self):
-        await self.frame_of(SN)
-        await self.bridge.on_device_gone(set())
-        await asyncio.sleep(self.cfg.offline_grace_s * 3)
-        self.assertEqual(self.mqtt.last(f"hypon/{SN}/connection"), ("ON", True))
+    async def test_one_off_and_one_lost_are_told_apart(self):
+        await self.frame(power=100)
+        await self.frame2(power=200)
+        self.links[IP] = MOVED                   # the first one is at another address
+        await self.silence(GRACE + 1)            # the second one is nowhere: off
+        self.assertEqual((self.status(SN), self.availability(SN)), ("ip_changed", "offline"))
+        self.assertEqual((self.status(SN2), self.availability(SN2)), ("sleeping", "online"))
+        self.assertEqual(self.state(SN2)["power"], 0)
+        self.assertIsNone(self.state(SN)["power"])
 
-    async def test_the_session_collects_the_serials_seen_on_a_connection(self):
-        session = set()
-        await self.frame_of(SN, session)
-        await self.frame_of(SN2, session)
-        await self.bridge.on_device_publish("offinvmonitor", support.build_monitor(sn="P0000000000000X1"),
-                                            "test", session)    # buffered frames are not live
-        self.assertEqual(session, {SN, SN2})
+
+class PersistenceTests(BridgeTestCase):
+    """A restart must not make Home Assistant trust a value nobody confirms any more."""
+
+    def setUp(self):
+        super().setUp()
+        self.directory = self.enterContext(support.temp_dir())
+        self.store = StateStore(self.directory)
+        self.bridge = self.make_bridge()
+
+    def restart(self):
+        """The add-on stops and starts again; the broker still holds the retained values."""
+        self.store.flush(force=True)
+        self.mqtt = support.RecordingMqtt()
+        self.store = StateStore.open(self.directory)
+        self.bridge = self.make_bridge()
+        return self.bridge
+
+    async def test_the_state_is_written_with_the_first_frame(self):
+        await self.frame(power=87, e_total=12.5)
+        self.assertTrue(self.store.flush(force=True))
+        record = StateStore.open(self.directory).data["inverters"][SN]
+        self.assertEqual(record["status"], "online")
+        self.assertEqual(record["state"]["power"], 87)
+        self.assertEqual(record["ip"], IP)
+
+    async def test_a_restart_republishes_what_it_served_before(self):
+        await self.frame(power=87, e_total=12.5)
+        await self.restart()._on_local_connect()
+        self.assertEqual(self.state()["power"], 87)
+        self.assertEqual(self.status(), "online")
+        self.assertIsNotNone(self.mqtt.last(f"homeassistant/sensor/hypon_{SN}/power/config"))
+
+    async def test_the_incident_the_inverter_comes_back_under_another_ip(self):
+        # Power cut at 87 W; the inverter comes back under another address, so no frame arrives.
+        await self.frame(power=87)
+        bridge = self.restart()
+        await bridge._on_local_connect()
+        self.assertEqual(self.state()["power"], 87)           # right after the restart: plausible
+        self.links[IP] = MOVED                                 # the monitor finds it elsewhere
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "ip_changed")
+        self.assertIsNone(self.state()["power"])
+        self.assertEqual(self.availability(), "offline")
+
+    async def test_the_incident_variant_the_inverter_is_simply_not_there(self):
+        await self.frame(power=87)
+        bridge = self.restart()
+        await bridge._on_local_connect()
+        await self.silence(GRACE + 1)                          # nothing anywhere on the network
+        self.assertEqual(self.status(), "sleeping")
+        self.assertEqual(self.state()["power"], 0)             # a known 0 W, never the stale 87
+        self.assertEqual(self.availability(), "online")
+
+    async def test_an_inverter_that_was_online_gets_a_full_window_to_report_again(self):
+        await self.frame(power=87)
+        self.clock.advance(3600)                  # the add-on was down for an hour
+        bridge = self.restart()
+        await bridge._on_local_connect()
+        self.assertEqual(self.status(), "online")
+        await self.silence(GRACE - 5)
+        self.assertEqual(self.status(), "online")
+        await self.silence(10)
+        self.assertEqual(self.status(), "sleeping")
+
+    async def test_a_sleeping_inverter_stays_sleeping_after_a_restart(self):
+        await self.frame(power=5)
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "sleeping")
+        self.clock.advance(7200)
+        bridge = self.restart()
+        await bridge._on_local_connect()
+        self.assertEqual(self.status(), "sleeping")
+        self.assertEqual(self.state()["power"], 0)
+        self.assertEqual(self.availability(), "online")
+
+    async def test_after_a_start_the_network_gets_time_to_be_looked_at_before_concluding(self):
+        await self.frame(power=5)
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "sleeping")
+        self.links[IP] = hs.Link(mac=MAC)         # the monitor has not looked yet
+        bridge = self.restart()
+        await bridge._on_local_connect()
+        await self.silence(hb.STARTUP_HOLD_S - 1)
+        self.assertEqual(self.status(), "sleeping")   # held: no flicker to "unavailable"
+        await self.silence(2)
+        self.assertEqual(self.status(), "unreachable")  # still nothing known: it cannot be vouched for
+
+    async def test_nothing_is_restored_without_a_usable_record(self):
+        self.store.data["inverters"] = {
+            "A": {"ip": None, "info": {}, "state": None, "last_seen": 1.0, "status": "online"},
+            "B": {"ip": None, "info": {}, "state": {"power": 1}, "last_seen": None, "status": "online"},
+            "C": {"ip": None, "info": {}, "state": {"power": 1}, "last_seen": 1.0, "status": "bogus"},
+        }
+        self.store.mark_dirty()
+        self.assertEqual(self.restart().units, {})
+
+
+class WatchdogTests(BridgeTestCase):
+    async def test_the_watchdog_evaluates_on_its_own_and_survives_errors(self):
+        await self.frame()
+        calls = []
+        real_refresh = self.bridge.refresh
+
+        async def flaky_refresh():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            await real_refresh()
+
+        self.bridge.refresh = flaky_refresh
+        with mock.patch.object(hb, "WATCH_INTERVAL_S", 0.01):
+            task = asyncio.create_task(self.bridge.watch())
+            await support.wait_until(lambda: len(calls) >= 3)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertGreaterEqual(len(calls), 3)
+
+    async def test_a_status_change_is_written_to_disk_at_once(self):
+        directory = self.enterContext(support.temp_dir())
+        self.store = StateStore(directory)
+        self.bridge = self.make_bridge()
+        await self.frame()
+        self.links[IP] = ALIVE
+        await self.silence(GRACE + 1)
+        self.assertEqual(StateStore.open(directory).data["inverters"][SN]["status"], "unreachable")
+
+
+class ConfigTests(unittest.TestCase):
+    def test_defaults(self):
+        cfg = make_config()
+        self.assertEqual(cfg.offline_grace_s, 300)
+        self.assertEqual(cfg.data_dir, "/data")
+        self.assertEqual(make_config(HYPON_DATA_DIR="/somewhere").data_dir, "/somewhere")
+        self.assertEqual(make_config(HYPON_OFFLINE_GRACE_S="60").offline_grace_s, 60)
 
 
 class OtherTopicsTests(BridgeTestCase):
@@ -257,7 +611,7 @@ class OtherTopicsTests(BridgeTestCase):
         self.assertFalse(retain)
         self.assertEqual(json.loads(payload)["power"], 77)
         self.assertIsNone(self.mqtt.last(f"hypon/{SN}/state"))
-        self.assertEqual(self.bridge.connected, set())
+        self.assertEqual(self.bridge.units, {})
         self.assertEqual(self.mqtt.count(prefix="homeassistant/"), 0)
 
     async def test_undecodable_frame_is_swallowed(self):

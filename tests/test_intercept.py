@@ -9,6 +9,8 @@ import support  # noqa: F401  (puts the add-on sources on sys.path)
 from support import wait_until
 
 import hypon_intercept as hi
+from hypon_status import Link
+from hypon_store import StateStore
 
 INV_IP, GW_IP, OUR_IP = "192.168.1.87", "192.168.1.254", "192.168.1.56"
 INV_MAC = bytes.fromhex("aabbccddeeff")
@@ -61,6 +63,21 @@ class ArpFrameTests(unittest.TestCase):
 
     def test_fmt_mac(self):
         self.assertEqual(hi.fmt_mac(OUR_MAC), "02:da:55:bf:4b:95")
+
+    def test_parse_mac_is_the_inverse_of_fmt_mac(self):
+        self.assertEqual(hi.parse_mac(hi.fmt_mac(INV_MAC)), INV_MAC)
+        for bad in (None, "", "not a mac", "aa:bb:cc", "aa:bb:cc:dd:ee:ff:00"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(hi.parse_mac(bad))
+
+    def test_parse_arp_returns_the_sender(self):
+        self.assertEqual(hi.parse_arp(arp_reply(INV_MAC, INV_IP)), (INV_MAC, INV_IP))
+        request = hi.build_arp(1, INV_MAC, INV_IP, hi.ZERO_MAC, GW_IP, hi.BROADCAST)
+        self.assertEqual(hi.parse_arp(request), (INV_MAC, INV_IP))
+
+    def test_parse_arp_ignores_what_is_not_arp(self):
+        self.assertIsNone(hi.parse_arp(b"\x00" * 10))
+        self.assertIsNone(hi.parse_arp(b"\xff" * 6 + b"\x00" * 6 + b"\x08\x00" + b"\x00" * 40))
 
 
 class ResolveMacTests(unittest.TestCase):
@@ -425,12 +442,21 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         """Make Interceptor.run() testable: no real discovery, no real bridge."""
         self.bridge_started = asyncio.Event()
 
-        async def fake_bridge(_cfg):
+        async def fake_bridge(_cfg, store, links):
+            self.bridge_args = (store, links)
             self.bridge_started.set()
             await asyncio.Event().wait()
-        for patcher in (mock.patch.dict(os.environ, {"HYPON_INV_IPS": INV_IP}, clear=True),
+
+        async def fake_monitor_run(_monitor, _sock, _stop):
+            await asyncio.Event().wait()
+        self.it.iface = "eth0"
+        for patcher in (mock.patch.dict(os.environ, {"HYPON_INV_IPS": INV_IP, "HYPON_DATA_DIR": ""},
+                                        clear=True),
                         mock.patch.object(hi.Interceptor, "discover", lambda _self: None),
-                        mock.patch.object(hi.hypon_bridge, "main_async", fake_bridge)):
+                        mock.patch.object(hi.hypon_bridge, "main_async", fake_bridge),
+                        mock.patch.object(hi, "open_arp_socket", lambda _iface: FakeSock()),
+                        mock.patch.object(hi, "lan_hosts", lambda _iface, _ip: []),
+                        mock.patch.object(hi.LinkMonitor, "run", fake_monitor_run)):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.it.listen_port = 18883
@@ -459,6 +485,366 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.rules[0].reverted)
         self.assertGreaterEqual(len([f for f in self.sock.sent if f[22:28] == GW_MAC]), 5)  # healed
         self.assertTrue(self.sock.closed)
+
+
+class KnownMacTests(unittest.IsolatedAsyncioTestCase):
+    """The MAC of an inverter is remembered: it is how it is recognised after a restart."""
+
+    def setUp(self):
+        self.directory = self.enterContext(support.temp_dir())
+        self.env = {"HYPON_INV_IPS": INV_IP, "HYPON_DATA_DIR": self.directory}
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.it = hi.Interceptor()
+        self.it.sock, self.it.our_mac, self.it.our_ip = FakeSock(), OUR_MAC, OUR_IP
+        self.it.gw_ip, self.it.gw_mac = GW_IP, GW_MAC
+        self.inv = self.it.inverters[0]
+
+    async def test_a_resolved_mac_is_remembered_in_the_store(self):
+        self.it.store = StateStore(self.directory)
+        with mock.patch.object(hi, "resolve_mac", return_value=INV_MAC):
+            self.assertTrue(await self.it._wait_for_inverter(self.inv))
+        self.assertEqual((self.inv.mac, self.inv.known_mac), (INV_MAC, INV_MAC))
+        self.assertEqual(self.it.store.get_mac(INV_IP), "aa:bb:cc:dd:ee:ff")
+        self.assertTrue(self.it.store.flush(force=True))
+        self.assertEqual(StateStore.open(self.directory).get_mac(INV_IP), "aa:bb:cc:dd:ee:ff")
+
+    async def test_without_a_store_resolving_still_works(self):
+        with mock.patch.object(hi, "resolve_mac", return_value=INV_MAC):
+            self.assertTrue(await self.it._wait_for_inverter(self.inv))
+        self.assertEqual(self.inv.known_mac, INV_MAC)
+
+    async def test_run_shares_the_store_and_the_links_with_the_bridge(self):
+        seen = {}
+
+        async def fake_bridge(_cfg, store, links):
+            seen.update(store=store, links=links, known=self.inv.known_mac)
+            await asyncio.Event().wait()
+
+        async def idle(*_args):
+            await asyncio.Event().wait()
+
+        seed = StateStore(self.directory)
+        seed.set_mac(INV_IP, "aa:bb:cc:dd:ee:ff")
+        seed.flush(force=True)
+        with (mock.patch.dict(os.environ, self.env, clear=True),
+              mock.patch.object(hi.Interceptor, "discover", lambda _self: None),
+              mock.patch.object(hi.hypon_bridge, "main_async", fake_bridge),
+              mock.patch.object(hi, "resolve_mac", return_value=None),
+              mock.patch.object(hi, "open_arp_socket", lambda _iface: FakeSock()),
+              mock.patch.object(hi, "lan_hosts", lambda _iface, _ip: []),
+              mock.patch.object(hi.LinkMonitor, "run", idle)):
+            task = asyncio.create_task(self.it.run())
+            await wait_until(lambda: "store" in seen)
+            task.cancel()
+            await asyncio.wait_for(task, 3)
+        self.assertEqual(seen["known"], INV_MAC)          # known although the inverter is asleep
+        self.assertIsInstance(seen["links"], dict)
+        self.assertIs(seen["store"], self.it.store)
+
+    async def test_a_missing_raw_socket_does_not_stop_the_add_on(self):
+        monitor = hi.LinkMonitor(self.it.inverters, OUR_MAC, OUR_IP, {})
+        self.it.iface = "eth0"
+        with mock.patch.object(hi, "open_arp_socket", side_effect=OSError("denied")):
+            await self.it._monitor(monitor)               # returns, does not raise
+
+    async def test_the_monitor_socket_is_closed_when_it_stops(self):
+        sock = FakeSock()
+
+        async def run(_sock, _stop):
+            return
+        monitor = hi.LinkMonitor(self.it.inverters, OUR_MAC, OUR_IP, {})
+        monitor.run = run
+        with mock.patch.object(hi, "open_arp_socket", return_value=sock):
+            await self.it._monitor(monitor)
+        self.assertTrue(sock.closed)
+
+
+class LinkMonitorTests(unittest.TestCase):
+    INV2_IP, INV2_MAC = "192.168.1.88", bytes.fromhex("010203040506")
+
+    def setUp(self):
+        self.now = 1000.0
+        self.links = {}
+        self.inv = hi.Inverter(INV_IP)
+        self.inv.known_mac = INV_MAC
+        self.monitor = hi.LinkMonitor([self.inv], OUR_MAC, OUR_IP, self.links, clock=lambda: self.now)
+
+    def link(self):
+        self.monitor.refresh()
+        return self.links[INV_IP]
+
+    def hears(self, mac, ip, kind="reply"):
+        frame = (arp_reply(mac, ip) if kind == "reply"
+                 else hi.build_arp(1, mac, ip, hi.ZERO_MAC, GW_IP, hi.BROADCAST))
+        self.monitor.handle_frame(frame)
+
+    def test_nothing_is_known_before_anything_is_heard_and_nothing_was_searched(self):
+        self.assertEqual(self.link(), Link(mac="aa:bb:cc:dd:ee:ff"))
+
+    def test_an_answer_from_the_inverter_at_its_ip_means_alive(self):
+        self.hears(INV_MAC, INV_IP)
+        link = self.link()
+        self.assertTrue(link.alive)
+        self.assertTrue(link.checked)          # it answered: the network was looked at
+
+    def test_its_own_requests_count_too(self):
+        self.hears(INV_MAC, INV_IP, kind="request")
+        self.assertTrue(self.link().alive)
+
+    def test_a_sign_of_life_expires(self):
+        self.hears(INV_MAC, INV_IP)
+        self.now += hi.ALIVE_TTL_S - 1
+        self.assertTrue(self.link().alive)
+        self.now += 2
+        link = self.link()
+        self.assertEqual((link.alive, link.checked), (False, False))
+
+    def test_another_host_answering_at_that_ip_is_not_the_inverter(self):
+        self.hears(GW_MAC, INV_IP)         # a different device took the address
+        self.assertFalse(self.link().alive)
+
+    def test_the_inverter_seen_under_another_ip_has_moved(self):
+        self.hears(INV_MAC, "192.168.1.140", kind="request")
+        link = self.link()
+        self.assertEqual((link.moved_to, link.alive), ("192.168.1.140", False))
+
+    def test_a_sighting_elsewhere_expires(self):
+        self.hears(INV_MAC, "192.168.1.140")
+        self.now += hi.MOVED_TTL_S + 1
+        self.assertIsNone(self.link().moved_to)
+
+    def test_coming_back_to_its_ip_cancels_the_move(self):
+        self.hears(INV_MAC, "192.168.1.140")
+        self.hears(INV_MAC, INV_IP)
+        link = self.link()
+        self.assertEqual((link.moved_to, link.alive), (None, True))
+
+    def test_address_conflict_probes_carry_no_sender_and_are_ignored(self):
+        self.hears(INV_MAC, "0.0.0.0", kind="request")     # sent by a booting device
+        link = self.link()
+        self.assertEqual((link.moved_to, link.alive), (None, False))
+
+    def test_our_own_spoofed_frames_and_junk_are_ignored(self):
+        self.monitor.handle_frame(hi.build_arp(2, OUR_MAC, GW_IP, INV_MAC, INV_IP, INV_MAC))
+        self.monitor.handle_frame(b"\x00" * 10)
+        self.assertEqual(self.link(), Link(mac="aa:bb:cc:dd:ee:ff"))
+
+    def test_an_inverter_whose_mac_is_unknown_cannot_be_followed_nor_declared_absent(self):
+        self.inv.known_mac = None
+        self.hears(INV_MAC, "192.168.1.140")
+        self.monitor._swept_at = self.now
+        self.assertEqual(self.link(), Link())
+
+    def test_each_inverter_is_followed_on_its_own(self):
+        inv2 = hi.Inverter(self.INV2_IP)
+        inv2.known_mac = self.INV2_MAC
+        monitor = hi.LinkMonitor([self.inv, inv2], OUR_MAC, OUR_IP, self.links, clock=lambda: self.now)
+        monitor.handle_frame(arp_reply(INV_MAC, INV_IP))
+        monitor.handle_frame(arp_reply(self.INV2_MAC, "192.168.1.141"))
+        monitor.refresh()
+        self.assertTrue(self.links[INV_IP].alive)
+        self.assertEqual(self.links[self.INV2_IP].moved_to, "192.168.1.141")
+        self.assertFalse(self.links[self.INV2_IP].alive)
+
+    def test_probe_asks_every_inverter_who_it_is(self):
+        inv2 = hi.Inverter(self.INV2_IP)
+        monitor = hi.LinkMonitor([self.inv, inv2], OUR_MAC, OUR_IP, self.links)
+        sock = FakeSock()
+        monitor.probe(sock)
+        self.assertEqual([f[38:42] for f in sock.sent],
+                         [socket.inet_aton(INV_IP), socket.inet_aton(self.INV2_IP)])
+        self.assertTrue(all(f[0:6] == hi.BROADCAST and f[20:22] == b"\x00\x01" for f in sock.sent))
+
+    def test_a_failing_probe_only_warns(self):
+        sock = FakeSock()
+        sock.fail_send = True
+        self.monitor.probe(sock)                            # must not raise
+
+    def test_drain_reads_everything_waiting_then_refreshes(self):
+        sock = FakeSock([arp_reply(INV_MAC, INV_IP), arp_reply(GW_MAC, GW_IP)])
+        self.monitor.drain(sock)
+        self.assertTrue(self.links[INV_IP].alive)
+        self.assertEqual(sock.incoming, [])
+
+
+class LinkMonitorSweepTests(unittest.IsolatedAsyncioTestCase):
+    """Looking for an inverter that does not answer: ask the whole LAN, then trust what came back."""
+
+    HOSTS = [f"192.168.1.{n}" for n in range(1, 11)]
+
+    def setUp(self):
+        self.now = 1000.0
+        self.links = {}
+        self.inv = hi.Inverter(INV_IP)
+        self.inv.known_mac = INV_MAC
+        self.monitor = hi.LinkMonitor([self.inv], OUR_MAC, OUR_IP, self.links, hosts=self.HOSTS,
+                                      clock=lambda: self.now)
+        patcher = mock.patch.object(hi, "SWEEP_REPLY_WAIT_S", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_a_sweep_asks_every_host_of_the_lan_who_it_is(self):
+        sock = FakeSock()
+        await self.monitor.sweep(sock)
+        self.assertEqual([socket.inet_ntoa(f[38:42]) for f in sock.sent], self.HOSTS)
+        self.assertTrue(all(f[0:6] == hi.BROADCAST and f[20:22] == b"\x00\x01" for f in sock.sent))
+
+    async def test_what_was_not_found_after_a_sweep_is_absent_not_unknown(self):
+        self.monitor.refresh()
+        self.assertFalse(self.links[INV_IP].checked)          # nothing searched yet
+        await self.monitor.sweep(FakeSock())
+        self.monitor.refresh()
+        link = self.links[INV_IP]
+        self.assertEqual((link.checked, link.alive, link.moved_to), (True, False, None))
+
+    async def test_the_sweep_finds_an_inverter_that_moved(self):
+        self.monitor.handle_frame(arp_reply(INV_MAC, "192.168.1.140"))   # its answer to the sweep
+        await self.monitor.sweep(FakeSock())
+        self.monitor.refresh()
+        link = self.links[INV_IP]
+        self.assertEqual((link.moved_to, link.checked), ("192.168.1.140", True))
+
+    async def test_a_sweep_stops_covering_the_network_after_a_while(self):
+        await self.monitor.sweep(FakeSock())
+        self.now += hi.SWEEP_VALID_S + 1
+        self.monitor.refresh()
+        self.assertFalse(self.links[INV_IP].checked)
+
+    async def test_a_failing_sweep_gives_up_without_claiming_anything(self):
+        sock = FakeSock()
+        sock.fail_send = True
+        await self.monitor.sweep(sock)                        # must not raise
+        self.monitor.refresh()
+        self.assertFalse(self.links[INV_IP].checked)
+
+    async def test_a_sweep_is_only_needed_while_a_known_inverter_does_not_answer(self):
+        self.assertTrue(self.monitor.needs_sweep())
+        self.monitor.handle_frame(arp_reply(INV_MAC, INV_IP))
+        self.assertFalse(self.monitor.needs_sweep())          # answering: no need to search
+        self.now += hi.ALIVE_TTL_S + 1
+        self.assertTrue(self.monitor.needs_sweep())
+        self.inv.known_mac = None
+        self.assertFalse(self.monitor.needs_sweep())          # nothing to look for without a MAC
+
+
+class SweepScheduleTests(unittest.IsolatedAsyncioTestCase):
+    """The search backs off: a night of silence must not mean a scan every two minutes."""
+
+    def setUp(self):
+        self.now = 1000.0
+        self.inv = hi.Inverter(INV_IP)
+        self.inv.known_mac = INV_MAC
+        self.monitor = hi.LinkMonitor([self.inv], OUR_MAC, OUR_IP, {}, hosts=["192.168.1.9"],
+                                      clock=lambda: self.now)
+        patcher = mock.patch.object(hi, "SWEEP_REPLY_WAIT_S", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def sweeps_until(self, horizon):
+        """Times (seconds from now) at which a sweep is made during the next `horizon` seconds."""
+        start, times = self.now, []
+        while self.now - start <= horizon:
+            if self.monitor.sweep_due():
+                times.append(self.now - start)
+                await self.monitor.sweep(FakeSock())
+            self.now += 1
+        return times
+
+    async def test_first_at_once_then_30_s_1_min_2_min_then_every_5_min(self):
+        times = await self.sweeps_until(30 + 60 + 120 + 300 + 300 + 5)
+        self.assertEqual(times, [0, 30, 90, 210, 510, 810])
+
+    async def test_a_silent_night_settles_at_one_search_every_five_minutes(self):
+        times = await self.sweeps_until(8 * 3600)
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        self.assertEqual(gaps[:4], [30, 60, 120, 300])
+        self.assertEqual(set(gaps[3:]), {300})
+        self.assertLess(len(times), 8 * 3600 / 300 + 5)         # about 100, not 240
+
+    async def test_nothing_is_searched_while_the_inverter_answers(self):
+        self.monitor.handle_frame(arp_reply(INV_MAC, INV_IP))
+        self.assertFalse(self.monitor.sweep_due())
+
+    async def test_an_inverter_that_answers_again_starts_the_sequence_over(self):
+        await self.sweeps_until(700)                            # deep into the slow rhythm
+        self.monitor.handle_frame(arp_reply(INV_MAC, INV_IP))   # it is back
+        self.assertFalse(self.monitor.sweep_due())
+        self.now += hi.ALIVE_TTL_S + 1                          # and gone again
+        times = await self.sweeps_until(100)
+        self.assertEqual(times, [0, 30, 90])                    # at once, then 30 s, then 1 min
+
+    async def test_the_sweep_still_covers_the_network_at_the_slowest_rhythm(self):
+        await self.sweeps_until(2000)
+        self.monitor.refresh()
+        self.assertTrue(self.monitor.links[INV_IP].checked)     # coverage never lapses between sweeps
+
+
+class LanHostsTests(unittest.TestCase):
+    ROUTES = ("Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n"
+              "enp0s18\t00000000\tFE01A8C0\t0003\t0\t0\t100\t00000000\n"
+              "enp0s18\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\n")
+
+    def hosts(self, routes, iface="enp0s18"):
+        with mock.patch.object(hi, "open", mock.mock_open(read_data=routes), create=True):
+            return hi.lan_hosts(iface, OUR_IP)
+
+    def test_hosts_of_the_connected_network_without_ourselves(self):
+        hosts = self.hosts(self.ROUTES)
+        self.assertEqual(len(hosts), 253)                    # a /24: 254 hosts, minus us
+        self.assertNotIn(OUR_IP, hosts)
+        self.assertIn(INV_IP, hosts)
+        self.assertNotIn("192.168.1.0", hosts)
+        self.assertNotIn("192.168.1.255", hosts)
+
+    def test_a_smaller_network_is_honoured(self):
+        routes = self.ROUTES.replace("00FFFFFF", "F0FFFFFF")    # a /28 (mask 255.255.255.240)
+        routes = routes.replace("0001A8C0", "3801A8C0")         # 192.168.1.56 network
+        hosts = self.hosts(routes)
+        self.assertEqual(len(hosts), 13)
+        self.assertTrue(all(h.startswith("192.168.1.") for h in hosts))
+
+    def test_a_huge_network_falls_back_to_the_24_around_us(self):
+        routes = self.ROUTES.replace("00FFFFFF", "0000FFFF").replace("0001A8C0", "0000A8C0")  # a /16
+        hosts = self.hosts(routes)
+        self.assertEqual(len(hosts), 253)
+        self.assertTrue(all(h.startswith("192.168.1.") for h in hosts))
+
+    def test_another_interface_or_an_unreadable_route_falls_back_to_the_24_around_us(self):
+        self.assertEqual(len(self.hosts(self.ROUTES, iface="wlan0")), 253)
+        with mock.patch.object(hi, "open", side_effect=OSError("nope"), create=True):
+            self.assertEqual(len(hi.lan_hosts("enp0s18", OUR_IP)), 253)
+
+
+class LinkMonitorRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_probes_sweeps_while_nothing_answers_then_stops_on_request(self):
+        class Selectable(FakeSock):
+            def setblocking(self, flag):
+                self.blocking = flag
+
+            def fileno(self):
+                return self.r_fd
+        read_end, write_end = socket.socketpair()
+        self.addCleanup(read_end.close)
+        self.addCleanup(write_end.close)
+        sock = Selectable()
+        sock.r_fd = read_end.fileno()
+        inv = hi.Inverter(INV_IP)
+        inv.known_mac = INV_MAC
+        links, stop = {}, asyncio.Event()
+        monitor = hi.LinkMonitor([inv], OUR_MAC, OUR_IP, links, hosts=["192.168.1.9", "192.168.1.10"])
+        with (mock.patch.object(hi, "LINK_PROBE_S", 0.01), mock.patch.object(hi, "SWEEP_REPLY_WAIT_S", 0),
+              mock.patch.object(hi, "SWEEP_BACKOFF_S", (1000.0,))):
+            task = asyncio.create_task(monitor.run(sock, stop))
+            await wait_until(lambda: INV_IP in links and links[INV_IP].checked)   # a sweep was done
+            swept = [socket.inet_ntoa(f[38:42]) for f in sock.sent]
+            self.assertIn("192.168.1.9", swept)
+            self.assertEqual(swept.count("192.168.1.9"), 1)          # and only one so far
+            sock.incoming.append(arp_reply(INV_MAC, INV_IP))
+            write_end.send(b"x")                                      # the socket becomes readable
+            await wait_until(lambda: links[INV_IP].alive)
+            stop.set()
+            await asyncio.wait_for(task, 3)
+        self.assertFalse(sock.blocking)
 
 
 if __name__ == "__main__":

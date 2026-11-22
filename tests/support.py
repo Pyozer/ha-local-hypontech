@@ -4,11 +4,13 @@ Importing this module puts the add-on sources on ``sys.path`` so that tests can 
 ``import hypon_bridge`` / ``import hypon_intercept``.
 """
 import asyncio
+import contextlib
 import logging
 import os
 import socket
 import struct
 import sys
+import tempfile
 import time
 from unittest import mock
 
@@ -167,10 +169,45 @@ class FakeBroker(FakeServer):
 
 # --------------------------------------------------------------------------- utilities
 
+class FakeClock:
+    """Monotonic and wall clocks that only move when the test says so (no sleeping)."""
+
+    def __init__(self, start):
+        """`start`: timezone-aware datetime the wall clock begins at."""
+        self._wall0 = start.timestamp()
+        self._elapsed = 0.0
+
+    def advance(self, seconds):
+        self._elapsed += seconds
+
+    def mono(self):
+        return 1000.0 + self._elapsed
+
+    def wall(self):
+        return self._wall0 + self._elapsed
+
+
 def make_config(**env):
     """Build a hypon_bridge.Config from an explicit environment (nothing leaks in)."""
     with mock.patch.dict(os.environ, env, clear=True):
         return hb.Config()
+
+
+@contextlib.contextmanager
+def logging_enabled():
+    """Let log records through (the suite silences them), for tests that assert on warnings."""
+    logging.disable(logging.NOTSET)
+    try:
+        yield
+    finally:
+        logging.disable(logging.CRITICAL)
+
+
+@contextlib.contextmanager
+def temp_dir():
+    """A scratch folder that disappears with the test."""
+    with tempfile.TemporaryDirectory() as directory:
+        yield directory
 
 
 def free_port():

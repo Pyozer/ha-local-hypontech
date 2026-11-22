@@ -22,6 +22,13 @@ import re
 import struct
 import sys
 import time
+from datetime import datetime, timezone
+
+from hypon_status import (
+    IP_CHANGED, NO_LINK, ONLINE, SLEEPING, STATUSES, UNAVAILABLE_STATUSES,
+    Cadence, decide, stale_threshold,
+)
+from hypon_store import StateStore
 
 LOG = logging.getLogger("hypon")
 
@@ -52,8 +59,10 @@ class Config:
         self.base_topic = e("HYPON_BASE_TOPIC", "hypon")
         # Availability of the bridge itself (MQTT Last Will): what the sensors depend on.
         self.status_topic = f"{self.base_topic}/bridge/status"
-        # Seconds without the collector before it is declared offline (absorbs dusk flapping).
+        # Seconds of silence tolerated before the inverter is no longer considered online
+        # (absorbs the collector dropping and reconnecting at dusk).
         self.offline_grace_s = int(e("HYPON_OFFLINE_GRACE_S", "300"))
+        self.data_dir = e("HYPON_DATA_DIR", "/data")  # persistent folder of the add-on
         self.publish_raw = e("HYPON_PUBLISH_RAW", "on").lower() not in ("off", "0", "false", "no")
         self.ha_host = e("HA_MQTT_HOST")
         self.ha_port = int(e("HA_MQTT_PORT", "1883"))
@@ -230,10 +239,10 @@ SENSORS = [
     ("energy_pv2", "PV2 énergie totale", "kWh", "energy", "total_increasing"),
 ]
 
-# Instantaneous production values forced to 0 while the collector is offline (no sun, inverter
-# asleep), like the Hypon cloud does. Totals, temperature and grid voltage/frequency keep their
-# last value.
-ZERO_WHEN_OFFLINE = (
+# Instantaneous production values: forced to 0 while the inverter is off (no light, like the Hypon
+# cloud does) and to unknown while it is lost. Totals, temperature and grid voltage/frequency
+# keep their last value.
+PRODUCTION_KEYS = (
     "power", "pv1_voltage", "pv1_current", "pv1_power",
     "pv2_voltage", "pv2_current", "pv2_power", "grid_current",
 )
@@ -327,46 +336,110 @@ class NullMqtt:
 
 # --------------------------------------------------------------------------- bridge
 
+WATCH_INTERVAL_S = 15  # how often the silence of every inverter is evaluated
+STARTUP_HOLD_S = 60    # after a start, the network is given this long to be looked at
+
+
+class Session:
+    """One collector connection. `ip` is where it comes from: the inverter's real address, since
+    the iptables redirect only changes the destination."""
+
+    def __init__(self, ip=None):
+        self.ip = ip
+
+
+class Unit:
+    """One micro-inverter, as the bridge knows it."""
+
+    def __init__(self, sn):
+        self.sn = sn
+        self.ip = None                # address its frames come from
+        self.info = {}                # model / firmware, from `invinfo`
+        self.state = None             # last decoded `invmonitor` frame
+        self.last_seen = None         # time.monotonic() of the last live frame
+        self.last_seen_wall = None    # the same instant on the wall clock (survives a restart)
+        self.status = None            # one of hypon_status.STATUSES
+        self.cadence = Cadence()
+        self.published_network = None
+
+    def to_record(self):
+        return {"ip": self.ip, "info": self.info, "state": self.state,
+                "last_seen": self.last_seen_wall, "status": self.status}
+
+    @classmethod
+    def from_record(cls, sn, record):
+        unit = cls(sn)
+        unit.ip = record.get("ip")
+        unit.info = record.get("info") or {}
+        unit.state = record.get("state")
+        unit.last_seen_wall = record.get("last_seen")
+        status = record.get("status")
+        unit.status = status if status in STATUSES else None
+        return unit
+
+
 class Bridge:
-    def __init__(self, cfg, local):
+    def __init__(self, cfg, local, store=None, links=None, mono=time.monotonic, wall=time.time):
         self.cfg = cfg
         self.local = local
         self.local.on_connect = self._on_local_connect
-        self.devices = {}  # inverter S/N -> info dict
-        self.announced = set()
-        self.connected = set()      # inverter S/N currently considered online
-        self.last_state = {}        # inverter S/N -> last decoded monitor frame
-        self.last_seen = {}         # inverter S/N -> time.monotonic() of the last live frame
-        self.offline_tasks = {}     # inverter S/N -> pending "declare offline" task
+        self.store = store if store is not None else StateStore()
+        self.links = links if links is not None else {}   # configured IP -> hypon_status.Link
+        self.units = {}               # inverter S/N -> Unit
+        self.announced = set()        # S/Ns whose Discovery configs were published
+        self._mono = mono             # monotonic clock: ageing of the frames
+        self._wall = wall             # wall clock: instants that are persisted
+        self._started = mono()
+        self._restore()
+
+    def _restore(self):
+        """Pick up where the previous run stopped, so the broker's retained values stay truthful."""
+        mono, wall = self._mono(), self._wall()
+        for sn, record in self.store.data["inverters"].items():
+            unit = Unit.from_record(sn, record)
+            if unit.state is None or unit.last_seen_wall is None or unit.status is None:
+                continue
+            if unit.status == ONLINE:
+                unit.last_seen = mono     # it gets one full window to be heard again
+            else:
+                unit.last_seen = mono - max(0.0, wall - unit.last_seen_wall)
+            self.units[sn] = unit
+        if self.units:
+            LOG.info("restored %d inverter(s) from the previous run", len(self.units))
+
+    def _unit(self, sn):
+        unit = self.units.get(sn)
+        if unit is None:
+            unit = self.units[sn] = Unit(sn)
+        return unit
+
+    def _remember(self, unit):
+        self.store.data["inverters"][unit.sn] = unit.to_record()
+        self.store.mark_dirty()
 
     async def _on_local_connect(self):
+        """(Re)connected to the broker: publish everything again, as a retained value may be gone
+        or stale."""
         self.announced.clear()
+        for unit in self.units.values():
+            if unit.last_seen is not None:
+                await self._evaluate(unit)
+                await self._publish_unit(unit)
 
     # ----- data handling
 
     async def on_device_publish(self, topic, payload, origin, session=None):
-        """`session` collects the inverter S/Ns seen on one collector connection (see handle_client)."""
         base = self.cfg.base_topic
         try:
             if topic == "invmonitor":
                 data = decode_monitor(payload)
                 sn = data["inverter_sn"]
-                if session is not None:
-                    session.add(sn)
                 LOG.info("%s %s P=%sW PV1=%sV/%sA PV2=%sV/%sA grid=%sV %sHz T=%s°C E=%skWh",
                          sn, data["device_time"], data["power"], data["pv1_voltage"],
                          data["pv1_current"], data["pv2_voltage"], data["pv2_current"],
                          data["grid_voltage"], data["grid_frequency"], data["temperature"],
                          data["energy_total"])
-                self.last_seen[sn] = time.monotonic()
-                self.last_state[sn] = data
-                self.connected.add(sn)
-                pending = self.offline_tasks.pop(sn, None)
-                if pending:
-                    pending.cancel()
-                await self._announce(sn)
-                await self.local.publish(f"{base}/{sn}/state", json.dumps(data), retain=True)
-                await self.local.publish(f"{base}/{sn}/connection", "ON", retain=True)
+                await self._on_frame(sn, data, session)
             elif topic == "offinvmonitor":
                 data = decode_monitor(payload)
                 LOG.info("buffered frame from %s: P=%sW E=%skWh",
@@ -375,8 +448,9 @@ class Bridge:
             elif topic == "invinfo":
                 info = decode_invinfo(payload)
                 LOG.info("inverter info: %s", info)
-                self.devices[info["inverter_sn"]] = info
-                self.announced.discard(info["inverter_sn"])
+                unit = self._unit(info["inverter_sn"])
+                unit.info = info
+                self.announced.discard(unit.sn)
             else:
                 LOG.debug("publish %s (%d bytes, %s)", topic, len(payload), origin)
         except Exception as exc:  # noqa: BLE001 - never break the relay on a decode error
@@ -384,11 +458,123 @@ class Bridge:
         if self.cfg.publish_raw:
             await self.local.publish(f"{base}/raw/{topic}", payload.hex())
 
-    async def _announce(self, sn):
-        if sn in self.announced:
+    async def _on_frame(self, sn, data, session):
+        """A live frame: the inverter is online, whatever it was before."""
+        unit = self._unit(sn)
+        if session is not None and session.ip:
+            unit.ip = session.ip
+        now = self._mono()
+        if unit.last_seen is not None:
+            unit.cadence.add(now - unit.last_seen)
+        unit.state, unit.last_seen, unit.last_seen_wall = data, now, self._wall()
+        await self._announce(unit)
+        await self._apply_status(unit, ONLINE)
+        await self._publish_state(unit)
+        await self._publish_network(unit)
+        self._remember(unit)
+
+    # ----- availability
+
+    def stale_threshold(self, unit):
+        return stale_threshold(self.cfg.offline_grace_s, unit.cadence)
+
+    async def _evaluate(self, unit):
+        """Decide what the inverter's silence means right now and publish any change."""
+        if unit.last_seen is None:
             return
-        self.announced.add(sn)
-        info = self.devices.get(sn, {})
+        link = self.links.get(unit.ip, NO_LINK) if unit.ip else NO_LINK
+        if not link.checked and self._mono() - self._started < STARTUP_HOLD_S:
+            return  # the network has not been looked at yet since the start: keep what we said
+        status = decide(self._mono() - unit.last_seen, self.stale_threshold(unit), link)
+        if status == IP_CHANGED and unit.status != IP_CHANGED:
+            LOG.warning("inverter %s: its MAC address %s is now at %s, not at %s any more. "
+                        "Give it a fixed IP and set that address in inverter_ips.",
+                        unit.sn, link.mac, link.moved_to, unit.ip)
+        if await self._apply_status(unit, status):
+            await self._publish_state(unit)
+        await self._publish_network(unit)
+
+    async def _apply_status(self, unit, status):
+        """Record a status change and publish it. Returns whether it changed."""
+        if status == unit.status:
+            return False
+        LOG.info("inverter %s: %s -> %s", unit.sn, unit.status or "new", status)
+        unit.status = status
+        self._remember(unit)
+        self.store.flush(force=True)
+        await self._publish_status(unit)
+        return True
+
+    async def watch(self):
+        """Forever: re-evaluate every inverter, because silence produces no event."""
+        while True:
+            await asyncio.sleep(WATCH_INTERVAL_S)
+            try:
+                await self.refresh()
+            except Exception:  # noqa: BLE001 - the watchdog must outlive any surprise
+                LOG.exception("availability check failed")
+
+    async def refresh(self):
+        for unit in list(self.units.values()):
+            await self._evaluate(unit)
+        await asyncio.to_thread(self.store.flush)
+
+    # ----- publishing
+
+    def _topic(self, unit, leaf):
+        return f"{self.cfg.base_topic}/{unit.sn}/{leaf}"
+
+    async def _publish_unit(self, unit):
+        """Everything Home Assistant shows for one inverter."""
+        await self._announce(unit)
+        await self._publish_status(unit)
+        await self._publish_state(unit)
+        await self._publish_network(unit, force=True)
+
+    async def _publish_status(self, unit):
+        status = unit.status
+        publish = self.local.publish
+        await publish(self._topic(unit, "status"), status, retain=True)
+        await publish(self._topic(unit, "connection"), "ON" if status == ONLINE else "OFF", retain=True)
+        # Measurements are unavailable only when they cannot be trusted. A sleeping inverter is
+        # a known 0 W, not a missing value.
+        await publish(self._topic(unit, "availability"),
+                      "offline" if status in UNAVAILABLE_STATUSES else "online", retain=True)
+
+    async def _publish_state(self, unit):
+        if unit.state is None:
+            return
+        payload = dict(unit.state)
+        if unit.status == SLEEPING:
+            payload.update(dict.fromkeys(PRODUCTION_KEYS, 0))     # night: it really is 0
+        elif unit.status in UNAVAILABLE_STATUSES:
+            payload.update(dict.fromkeys(PRODUCTION_KEYS))        # unknown: never keep the last value
+        payload["last_seen"] = datetime.fromtimestamp(
+            unit.last_seen_wall, timezone.utc).isoformat(timespec="seconds")
+        await self.local.publish(self._topic(unit, "state"), json.dumps(payload), retain=True)
+
+    def _configured_ip(self, unit):
+        """The address the add-on intercepts for this inverter: where its frames come from, as
+        long as it is still one of the configured `inverter_ips`."""
+        if unit.ip and (not self.links or unit.ip in self.links):
+            return unit.ip
+        return None
+
+    async def _publish_network(self, unit, force=False):
+        link = self.links.get(unit.ip, NO_LINK) if unit.ip else NO_LINK
+        # "ip" is where the inverter really is, "configured_ip" where the add-on expects it: an
+        # automation can compare them, or simply watch the status.
+        network = {"ip": link.moved_to or unit.ip, "configured_ip": self._configured_ip(unit),
+                   "mac": link.mac}
+        if force or network != unit.published_network:
+            unit.published_network = network
+            await self.local.publish(self._topic(unit, "network"), json.dumps(network), retain=True)
+
+    async def _announce(self, unit):
+        if unit.sn in self.announced:
+            return
+        self.announced.add(unit.sn)
+        sn, info = unit.sn, unit.info
         base, prefix = self.cfg.base_topic, self.cfg.discovery_prefix
         device = {
             "identifiers": [f"hypon_{sn}"],
@@ -399,77 +585,74 @@ class Bridge:
         }
         if info.get("firmware"):
             device["sw_version"] = info["firmware"]
-        # Entities depend on the bridge (Last Will), NOT on the inverter: when the inverter sleeps at
-        # night they keep their last/zeroed value instead of going "unavailable".
-        availability_topic = self.cfg.status_topic
-        for key, name, unit, dev_class, state_class in SENSORS:
-            config = {
-                "name": name,
-                "unique_id": f"hypon_{sn}_{key}",
-                "object_id": f"hypon_{key}",
-                "state_topic": f"{base}/{sn}/state",
-                "value_template": "{{ value_json.%s }}" % key,
-                "availability_topic": availability_topic,
-                "unit_of_measurement": unit,
-                "device_class": dev_class,
-                "state_class": state_class,
-                "device": device,
-            }
-            await self.local.publish(f"{prefix}/sensor/hypon_{sn}/{key}/config",
-                                     json.dumps(config), retain=True)
-        connection = {
-            "name": "Connexion",
-            "unique_id": f"hypon_{sn}_connection",
-            "object_id": "hypon_connection",
-            "state_topic": f"{base}/{sn}/connection",
-            "payload_on": "ON",
-            "payload_off": "OFF",
-            "availability_topic": availability_topic,
-            "device_class": "connectivity",
-            "entity_category": "diagnostic",
-            "device": device,
+        # Measurements need the bridge AND a trustworthy inverter. Diagnostics only need the
+        # bridge: they are what explains why the measurements are unavailable.
+        measurement_availability = {
+            "availability": [{"topic": self.cfg.status_topic}, {"topic": f"{base}/{sn}/availability"}],
+            "availability_mode": "all",
         }
-        await self.local.publish(f"{prefix}/binary_sensor/hypon_{sn}/connection/config",
-                                 json.dumps(connection), retain=True)
-        # Clear the per-inverter availability topic used by versions <= 0.2.0 (retained "offline").
-        await self.local.publish(f"{base}/{sn}/availability", "", retain=True)
-
-    async def on_device_gone(self, serials=None):
-        """A collector's TCP session ended. Do not flag its inverter offline right away: at dusk
-        it drops and reconnects repeatedly. Wait the grace period, then check nothing came back.
-
-        `serials` are the inverters seen on that connection: the others are left alone, so one
-        inverter going to sleep never affects its neighbours. None = every connected inverter."""
-        since = time.monotonic()
-        gone = self.connected if serials is None else self.connected & set(serials)
-        for sn in list(gone):
-            pending = self.offline_tasks.pop(sn, None)
-            if pending:
-                pending.cancel()
-            self.offline_tasks[sn] = asyncio.create_task(self._offline_after_grace(sn, since))
-
-    async def _offline_after_grace(self, sn, since):
-        task = asyncio.current_task()
-        try:
-            await asyncio.sleep(self.cfg.offline_grace_s)
-            if self.last_seen.get(sn, 0) > since:
-                return  # a live frame arrived in the meantime: the collector is back
-            await self._mark_offline(sn)
-        finally:
-            if self.offline_tasks.get(sn) is task:
-                del self.offline_tasks[sn]
-
-    async def _mark_offline(self, sn):
-        self.connected.discard(sn)
-        state = dict(self.last_state.get(sn, {}))
-        if state:
-            for key in ZERO_WHEN_OFFLINE:
-                if key in state:
-                    state[key] = 0
-            await self.local.publish(f"{self.cfg.base_topic}/{sn}/state", json.dumps(state), retain=True)
-        await self.local.publish(f"{self.cfg.base_topic}/{sn}/connection", "OFF", retain=True)
-        LOG.info("inverter %s offline for %ss: production zeroed, totals kept",
-                 sn, self.cfg.offline_grace_s)
+        diagnostic = {"availability_topic": self.cfg.status_topic, "entity_category": "diagnostic"}
+        entities = [("sensor", key, {
+            "name": name,
+            "state_topic": f"{base}/{sn}/state",
+            "value_template": "{{ value_json.%s }}" % key,
+            "unit_of_measurement": unit_of_measurement,
+            "device_class": dev_class,
+            "state_class": state_class,
+            **measurement_availability,
+        }) for key, name, unit_of_measurement, dev_class, state_class in SENSORS]
+        entities += [
+            ("binary_sensor", "connection", {
+                "name": "Connexion",
+                "state_topic": f"{base}/{sn}/connection",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "device_class": "connectivity",
+                **diagnostic,
+            }),
+            ("sensor", "status", {
+                "name": "Statut",
+                "state_topic": f"{base}/{sn}/status",
+                "device_class": "enum",
+                "options": list(STATUSES),
+                "icon": "mdi:solar-power",
+                **diagnostic,
+            }),
+            ("sensor", "last_seen", {
+                "name": "Dernière trame",
+                "state_topic": f"{base}/{sn}/state",
+                "value_template": "{{ value_json.last_seen }}",
+                "device_class": "timestamp",
+                **diagnostic,
+            }),
+            ("sensor", "ip_address", {
+                "name": "Adresse IP",
+                "state_topic": f"{base}/{sn}/network",
+                "value_template": "{{ value_json.ip or none }}",
+                "icon": "mdi:ip-network",
+                **diagnostic,
+            }),
+            ("sensor", "configured_ip", {
+                "name": "Adresse IP configurée",
+                "state_topic": f"{base}/{sn}/network",
+                "value_template": "{{ value_json.configured_ip or none }}",
+                "icon": "mdi:ip-network-outline",
+                **diagnostic,
+            }),
+            ("sensor", "mac_address", {
+                "name": "Adresse MAC",
+                "state_topic": f"{base}/{sn}/network",
+                "value_template": "{{ value_json.mac or none }}",
+                "icon": "mdi:network",
+                "enabled_by_default": False,
+                **diagnostic,
+            }),
+        ]
+        for component, key, config in entities:
+            config.update({"unique_id": f"hypon_{sn}_{key}", "object_id": f"hypon_{key}",
+                           "device": device})
+            await self.local.publish(f"{prefix}/{component}/hypon_{sn}/{key}/config",
+                                     json.dumps(config), retain=True)
 
     async def tap(self, first_byte, body, origin, session=None):
         ptype = first_byte >> 4
@@ -497,7 +680,7 @@ class Bridge:
     async def handle_client(self, reader, writer):
         peer = writer.get_extra_info("peername")
         LOG.info("collector connected from %s", peer)
-        session = set()  # S/Ns of the inverters heard on this connection
+        session = Session(peer[0] if peer else None)
         upstream = None
         if self.cfg.upstream_enabled:
             try:
@@ -517,8 +700,9 @@ class Bridge:
             for w in (writer, upstream[1] if upstream else None):
                 if w:
                     w.close()
+            # Nothing else to do: a dropped connection says little (the collector reconnects all
+            # the time at dusk). What matters is the silence that follows, see watch().
             LOG.info("collector %s disconnected", peer)
-            await self.on_device_gone(session)
 
     async def _relay(self, c_reader, c_writer, u_reader, u_writer, session=None):
         async def pump(src, dst, on_packet):
@@ -611,14 +795,21 @@ class Bridge:
             return
 
 
-async def main_async(cfg):
+async def main_async(cfg, store=None, links=None):
+    """Run the bridge. `store` (persistent state) and `links` (network evidence about each
+    inverter, filled in by the interceptor) are shared with the caller when given."""
     local = LocalMqtt(cfg) if cfg.ha_host else NullMqtt()
-    bridge = Bridge(cfg, local)
+    if store is None:
+        store = StateStore.open(cfg.data_dir)
+    bridge = Bridge(cfg, local, store, links)
     server = await asyncio.start_server(bridge.handle_client, cfg.listen_host, cfg.listen_port)
     LOG.info("listening on %s:%s, cloud relay %s", cfg.listen_host, cfg.listen_port,
              f"{cfg.upstream_host}:{cfg.upstream_port}" if cfg.upstream_enabled else "disabled")
-    async with server:
-        await asyncio.gather(server.serve_forever(), local.run())
+    try:
+        async with server:
+            await asyncio.gather(server.serve_forever(), local.run(), bridge.watch())
+    finally:
+        store.flush(force=True)
 
 
 def main():

@@ -13,6 +13,9 @@ What it does, on the host network (one flat L2 segment):
    forwarding on), so it keeps its DNS / NTP / cloud for every other purpose.
 3. Runs the existing hypon_bridge (relay to the real cloud + decode + MQTT Discovery).
 4. On shutdown, heals the inverter's ARP cache and removes every rule it added.
+5. Meanwhile, watches ARP (LinkMonitor) to tell the bridge whether each inverter is alive on
+   its configured IP or has been seen under another one, which is what lets a lost inverter
+   be told apart from one that simply sleeps.
 
 One or several inverters can be handled (HYPON_INV_IPS, comma separated): each one gets its
 own ARP spoofing and its own rules, all feeding the same bridge, which tells them apart by serial
@@ -31,6 +34,8 @@ import sys
 import time
 
 import hypon_bridge
+from hypon_status import Link
+from hypon_store import StateStore
 
 LOG = logging.getLogger("hypon.intercept")
 
@@ -40,6 +45,15 @@ ZERO_MAC = b"\x00\x00\x00\x00\x00\x00"
 ARP_INTERVAL_S = 2.0  # how often we re-assert the spoofed gateway entry
 INVERTER_RETRY_S = 25.0  # pause between ARP lookups while the inverter is unreachable (asleep)
 INVERTER_WARN_EVERY = 20  # repeat the "still waiting" warning every N failed lookups (~10 min)
+LINK_PROBE_S = 30.0  # how often each inverter is asked "are you there?" (ARP request)
+# While an inverter does not answer, the LAN is searched for its MAC: at once, then after each of
+# these waits (the last one repeats), so a night of silence costs one search every 5 minutes.
+SWEEP_BACKOFF_S = (30.0, 60.0, 120.0, 300.0)
+SWEEP_VALID_S = 2 * SWEEP_BACKOFF_S[-1]  # a search covers the network for this long
+SWEEP_REPLY_WAIT_S = 3.0  # time given to the hosts to answer a sweep
+ALIVE_TTL_S = 120.0  # an ARP sign of life from the inverter counts for this long
+MOVED_TTL_S = 900.0  # a sighting of the inverter under another IP counts for this long
+MAX_SWEEP_PREFIX = 22  # never sweep a network bigger than a /22 (1022 hosts): fall back to a /24
 
 
 # --------------------------------------------------------------------------- configuration
@@ -122,6 +136,46 @@ def fmt_mac(mac):
     return ":".join(f"{b:02x}" for b in mac)
 
 
+def lan_hosts(iface, our_ip):
+    """Addresses of the local network (other than ours), to search it for an inverter.
+
+    Taken from the kernel's route for `iface`; a network bigger than a /22 or an unreadable
+    route falls back to the /24 around `our_ip`."""
+    network = ipaddress.ip_network(f"{our_ip}/24", strict=False)
+    try:
+        with open("/proc/net/route", encoding="ascii") as f:
+            next(f)
+            for line in f:
+                p = line.split()
+                if len(p) > 7 and p[0] == iface and p[1] != "00000000" and p[2] == "00000000":
+                    dest = ipaddress.IPv4Address(socket.inet_ntoa(struct.pack("<I", int(p[1], 16))))
+                    mask = ipaddress.IPv4Address(socket.inet_ntoa(struct.pack("<I", int(p[7], 16))))
+                    found = ipaddress.ip_network(f"{dest}/{mask}", strict=False)
+                    if found.prefixlen >= MAX_SWEEP_PREFIX and ipaddress.ip_address(our_ip) in found:
+                        network = found
+                    break
+    except (OSError, ValueError) as exc:
+        LOG.warning("cannot read /proc/net/route (%s): sweeping %s", exc, network)
+    return [str(host) for host in network.hosts() if str(host) != our_ip]
+
+
+def parse_mac(text):
+    """Bytes of a 'aa:bb:cc:dd:ee:ff' address, None if it is not one."""
+    try:
+        mac = bytes.fromhex((text or "").replace(":", ""))
+    except ValueError:
+        return None
+    return mac if len(mac) == 6 else None
+
+
+def parse_arp(frame):
+    """(sender MAC, sender IP) of an Ethernet frame carrying ARP, else None."""
+    if len(frame) < 42 or frame[12:14] != b"\x08\x06":
+        return None
+    arp = frame[14:]
+    return arp[8:14], socket.inet_ntoa(arp[14:18])
+
+
 # --------------------------------------------------------------------------- netfilter
 
 def run_ipt(args):
@@ -198,14 +252,144 @@ class Inverter:
 
     def __init__(self, ip):
         self.ip = ip
-        self.mac = None
+        self.mac = None        # resolved during this run: what the spoofing is aimed at
+        self.known_mac = None  # also remembered from a previous run: how the inverter is recognised
         self.rules = None
+
+
+class LinkMonitor:
+    """Tells the bridge what the network says about each inverter.
+
+    Silence alone cannot tell an inverter that is off (night, storm) from one whose IP address
+    changed. The network can: a powered inverter answers ARP, at its configured IP or at
+    another one if it moved, always with the same MAC; an inverter that is off is nowhere. This
+    watches ARP on a socket of its own, asks each inverter "are you there?" now and then and,
+    while one does not answer, searches the whole LAN for its MAC. It keeps `links[ip]` up to
+    date (see Link)."""
+
+    def __init__(self, inverters, our_mac, our_ip, links, hosts=(), clock=time.monotonic):
+        self.inverters = inverters
+        self.our_mac = our_mac
+        self.our_ip = our_ip
+        self.links = links
+        self.hosts = list(hosts)  # addresses searched for a moved inverter
+        self._clock = clock
+        self._alive_at = {}  # configured IP -> when the inverter last spoke from that address
+        self._moved = {}     # configured IP -> (IP seen instead, when)
+        self._swept_at = None  # when the last complete search of the LAN ended
+        self._sweeps = 0       # searches made since the inverter stopped answering
+        self._last_sweep = None  # when the last one started
+
+    def handle_frame(self, frame):
+        arp = parse_arp(frame)
+        if arp is None:
+            return
+        mac, ip = arp
+        if ip == "0.0.0.0":
+            return  # an address-conflict probe: it carries no sender address
+        now = self._clock()
+        for inv in self.inverters:
+            if inv.known_mac is None or mac != inv.known_mac:
+                continue
+            if ip == inv.ip:
+                self._alive_at[inv.ip] = now
+                self._moved.pop(inv.ip, None)
+            else:
+                self._moved[inv.ip] = (ip, now)
+
+    def _alive(self, inv, now):
+        alive_at = self._alive_at.get(inv.ip)
+        return alive_at is not None and now - alive_at <= ALIVE_TTL_S
+
+    def refresh(self):
+        now = self._clock()
+        swept = self._swept_at is not None and now - self._swept_at <= SWEEP_VALID_S
+        for inv in self.inverters:
+            moved = self._moved.get(inv.ip)
+            alive = self._alive(inv, now)
+            self.links[inv.ip] = Link(
+                mac=fmt_mac(inv.known_mac) if inv.known_mac else None,
+                alive=alive,
+                moved_to=moved[0] if moved and now - moved[1] <= MOVED_TTL_S else None,
+                # "not seen" only means "absent" if we really looked, and we can only look for
+                # an inverter whose MAC we know.
+                checked=inv.known_mac is not None and (alive or swept))
+
+    def _request(self, sock, ip):
+        sock.send(build_arp(1, self.our_mac, self.our_ip, ZERO_MAC, ip, BROADCAST))
+
+    def probe(self, sock):
+        for inv in self.inverters:
+            try:
+                self._request(sock, inv.ip)
+            except OSError as exc:
+                LOG.warning("ARP probe failed: %s", exc)
+
+    def needs_sweep(self):
+        """True while a known inverter does not answer at its configured IP."""
+        now = self._clock()
+        return any(inv.known_mac is not None and not self._alive(inv, now) for inv in self.inverters)
+
+    def sweep_due(self):
+        """True when the LAN should be searched now: at once when an inverter stops answering,
+        then after 30 s, 1 min, 2 min and every 5 min. An inverter that answers again starts
+        the sequence over."""
+        if not self.needs_sweep():
+            self._sweeps, self._last_sweep = 0, None
+            return False
+        if self._last_sweep is None:
+            return True
+        wait = SWEEP_BACKOFF_S[min(self._sweeps - 1, len(SWEEP_BACKOFF_S) - 1)]
+        return self._clock() - self._last_sweep >= wait
+
+    async def sweep(self, sock):
+        """Ask every address of the LAN who it is: an inverter that moved shows its MAC again."""
+        self._last_sweep = self._clock()
+        self._sweeps += 1
+        for count, ip in enumerate(self.hosts, 1):
+            try:
+                self._request(sock, ip)
+            except OSError as exc:
+                LOG.warning("ARP sweep failed: %s", exc)
+                return
+            if count % 64 == 0:
+                await asyncio.sleep(0)  # let the replies through
+        await asyncio.sleep(SWEEP_REPLY_WAIT_S)
+        self._swept_at = self._clock()
+
+    def drain(self, sock):
+        """Handle every frame waiting on the (non-blocking) socket."""
+        while True:
+            try:
+                frame = sock.recv(2048)
+            except (BlockingIOError, socket.timeout):
+                break
+            self.handle_frame(frame)
+        self.refresh()
+
+    async def run(self, sock, stop):
+        loop = asyncio.get_running_loop()
+        sock.setblocking(False)
+        loop.add_reader(sock.fileno(), self.drain, sock)
+        try:
+            while not stop.is_set():
+                self.probe(sock)
+                if self.sweep_due():
+                    await self.sweep(sock)
+                self.refresh()
+                try:
+                    await asyncio.wait_for(stop.wait(), LINK_PROBE_S)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            loop.remove_reader(sock.fileno())
 
 
 class Interceptor:
     def __init__(self):
         self.inverters = [Inverter(ip) for ip in parse_ips(os.environ.get("HYPON_INV_IPS"))]
         self._applied = []  # inverters whose rules are in place, in the order they were applied
+        self.store = None   # persistent state, opened by run()
         self.gw_ip = os.environ.get("HYPON_GW_IP", "").strip()
         self.iface = os.environ.get("HYPON_IFACE", "").strip()
         self.listen_port = int(os.environ.get("HYPON_LISTEN_PORT", "18883"))
@@ -260,14 +444,16 @@ class Interceptor:
             mac = await asyncio.to_thread(
                 resolve_mac, self.sock, self.our_mac, self.our_ip, inv.ip)
             if mac:
-                inv.mac = mac
+                inv.mac = inv.known_mac = mac
+                if self.store is not None:
+                    self.store.set_mac(inv.ip, fmt_mac(mac))
                 LOG.info("inverter %s MAC %s%s", inv.ip, fmt_mac(mac),
                          f" (answered after {failures} failed lookups)" if failures else "")
                 return True
             if failures % INVERTER_WARN_EVERY == 0:
-                LOG.warning("inverter %s does not answer ARP: probably switched off (no sun), "
-                            "waiting for it. If it never shows up, check the IP and that the "
-                            "add-on is on the same L2 network.", inv.ip)
+                LOG.warning("inverter %s does not answer ARP: probably switched off (no light on the "
+                            "panels), waiting for it. If it never shows up, check the IP and that "
+                            "the add-on is on the same L2 network.", inv.ip)
             failures += 1
             try:
                 await asyncio.wait_for(self._stop.wait(), INVERTER_RETRY_S)
@@ -287,6 +473,19 @@ class Interceptor:
         inv.rules.apply()
         self._applied.append(inv)
         await self.arp_loop(inv)
+
+    async def _monitor(self, monitor):
+        """Feed the bridge with what the network says about the inverters (own raw socket, so
+        the lookups of _wait_for_inverter and the monitor never steal each other's replies)."""
+        try:
+            sock = open_arp_socket(self.iface)
+        except OSError as exc:
+            LOG.warning("cannot watch ARP (%s): a changed inverter IP will not be recognised", exc)
+            return
+        try:
+            await monitor.run(sock, self._stop)
+        finally:
+            sock.close()
 
     def _spoof_frame(self, inv):
         # Tell the inverter: gateway_ip is at OUR mac.
@@ -329,8 +528,17 @@ class Interceptor:
         os.environ.setdefault("HYPON_LISTEN_HOST", "0.0.0.0")
         os.environ["HYPON_LISTEN_PORT"] = str(self.listen_port)
         cfg = hypon_bridge.Config()
+        # The state survives restarts: the MAC of each inverter is how it is recognised even
+        # when it is asleep or has changed IP, and it tells the bridge what it served before.
+        self.store = StateStore.open(cfg.data_dir)
+        for inv in self.inverters:
+            inv.known_mac = parse_mac(self.store.get_mac(inv.ip))
+        links = {}
+        monitor = LinkMonitor(self.inverters, self.our_mac, self.our_ip, links,
+                              hosts=lan_hosts(self.iface, self.our_ip))
         try:
-            await asyncio.gather(hypon_bridge.main_async(cfg), self._intercept())
+            await asyncio.gather(hypon_bridge.main_async(cfg, self.store, links),
+                                 self._intercept(), self._monitor(monitor))
         except asyncio.CancelledError:
             pass
         finally:
