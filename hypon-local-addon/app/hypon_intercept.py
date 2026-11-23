@@ -22,6 +22,7 @@ own ARP spoofing and its own rules, all feeding the same bridge, which tells the
 number. Only the inverters are affected. Nothing else on the network is touched.
 """
 import asyncio
+import errno
 import ipaddress
 import logging
 import os
@@ -51,6 +52,12 @@ LINK_PROBE_S = 30.0  # how often each inverter is asked "are you there?" (ARP re
 SWEEP_BACKOFF_S = (30.0, 60.0, 120.0, 300.0)
 SWEEP_VALID_S = 2 * SWEEP_BACKOFF_S[-1]  # a search covers the network for this long
 SWEEP_REPLY_WAIT_S = 3.0  # time given to the hosts to answer a sweep
+# A burst of 250 requests overflows the send queue of the interface (EAGAIN): they go out in small
+# batches, with a pause to let it empty, and a full queue is waited for, never a reason to give up.
+SWEEP_BATCH = 16
+SWEEP_PAUSE_S = 0.05
+SWEEP_SEND_RETRIES = 40
+QUEUE_FULL_ERRNOS = (errno.EAGAIN, errno.ENOBUFS)  # what a full send queue answers (Linux, macOS)
 ALIVE_TTL_S = 120.0  # an ARP sign of life from the inverter counts for this long
 MOVED_TTL_S = 900.0  # a sighting of the inverter under another IP counts for this long
 MAX_SWEEP_PREFIX = 22  # never sweep a network bigger than a /22 (1022 hosts): fall back to a /24
@@ -342,18 +349,29 @@ class LinkMonitor:
         wait = SWEEP_BACKOFF_S[min(self._sweeps - 1, len(SWEEP_BACKOFF_S) - 1)]
         return self._clock() - self._last_sweep >= wait
 
+    async def _request_waiting(self, sock, ip):
+        """Send one request, waiting while the interface's send queue is full. False if it cannot."""
+        for _ in range(SWEEP_SEND_RETRIES):
+            try:
+                self._request(sock, ip)
+                return True
+            except OSError as exc:
+                if exc.errno not in QUEUE_FULL_ERRNOS:
+                    LOG.warning("ARP sweep failed: %s", exc)
+                    return False
+                await asyncio.sleep(SWEEP_PAUSE_S)  # the queue is full: let it drain
+        LOG.warning("ARP sweep failed: the send queue of the interface stays full")
+        return False
+
     async def sweep(self, sock):
         """Ask every address of the LAN who it is: an inverter that moved shows its MAC again."""
         self._last_sweep = self._clock()
         self._sweeps += 1
         for count, ip in enumerate(self.hosts, 1):
-            try:
-                self._request(sock, ip)
-            except OSError as exc:
-                LOG.warning("ARP sweep failed: %s", exc)
+            if not await self._request_waiting(sock, ip):
                 return
-            if count % 64 == 0:
-                await asyncio.sleep(0)  # let the replies through
+            if count % SWEEP_BATCH == 0:
+                await asyncio.sleep(SWEEP_PAUSE_S)  # let the interface empty its queue
         await asyncio.sleep(SWEEP_REPLY_WAIT_S)
         self._swept_at = self._clock()
 

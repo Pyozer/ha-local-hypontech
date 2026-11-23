@@ -1,5 +1,6 @@
 """Interceptor: ARP helpers, netfilter rules, inverter discovery and lifecycle."""
 import asyncio
+import errno
 import itertools
 import os
 import socket
@@ -26,6 +27,8 @@ class FakeSock:
         self.sent = []
         self.incoming = list(incoming)
         self.fail_send = False
+        self.would_block = 0      # sends that fail as a full send queue does
+        self.block_errno = errno.EAGAIN
         self.closed = False
 
     def settimeout(self, _t):
@@ -34,6 +37,9 @@ class FakeSock:
     def send(self, frame):
         if self.fail_send:
             raise OSError("network is down")
+        if self.would_block:
+            self.would_block -= 1
+            raise OSError(self.block_errno, "send queue full")
         self.sent.append(frame)
 
     def recv(self, _n):
@@ -680,9 +686,10 @@ class LinkMonitorSweepTests(unittest.IsolatedAsyncioTestCase):
         self.inv.known_mac = INV_MAC
         self.monitor = hi.LinkMonitor([self.inv], OUR_MAC, OUR_IP, self.links, hosts=self.HOSTS,
                                       clock=lambda: self.now)
-        patcher = mock.patch.object(hi, "SWEEP_REPLY_WAIT_S", 0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name in ("SWEEP_REPLY_WAIT_S", "SWEEP_PAUSE_S"):
+            patcher = mock.patch.object(hi, name, 0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     async def test_a_sweep_asks_every_host_of_the_lan_who_it_is(self):
         sock = FakeSock()
@@ -711,6 +718,56 @@ class LinkMonitorSweepTests(unittest.IsolatedAsyncioTestCase):
         self.monitor.refresh()
         self.assertFalse(self.links[INV_IP].checked)
 
+    async def test_a_full_send_queue_is_waited_for_not_given_up_on(self):
+        # The incident of 23 November: "[Errno 11] Resource temporarily unavailable" on every
+        # sweep, so the network was never "looked at" and a faded inverter read "unavailable".
+        sock = FakeSock()
+        sock.would_block = 5                                  # the queue is full for a moment
+        await self.monitor.sweep(sock)
+        self.assertEqual([socket.inet_ntoa(f[38:42]) for f in sock.sent], self.HOSTS)  # none lost
+        self.monitor.refresh()
+        self.assertTrue(self.links[INV_IP].checked)
+
+    async def test_a_full_queue_answering_no_buffer_space_is_waited_for_too(self):
+        sock = FakeSock()
+        sock.would_block, sock.block_errno = 5, errno.ENOBUFS      # what a full qdisc answers
+        await self.monitor.sweep(sock)
+        self.assertEqual([socket.inet_ntoa(f[38:42]) for f in sock.sent], self.HOSTS)
+
+    async def test_a_queue_that_blocks_in_the_middle_of_the_sweep_resumes_where_it_stopped(self):
+        sock = FakeSock()
+        original_send = sock.send
+        calls = []
+
+        def send(frame):
+            calls.append(1)
+            if len(calls) == 4:
+                sock.would_block = 3
+            original_send(frame)
+        sock.send = send
+        await self.monitor.sweep(sock)
+        self.assertEqual([socket.inet_ntoa(f[38:42]) for f in sock.sent], self.HOSTS)
+
+    async def test_a_queue_that_never_drains_gives_up_after_a_while_and_claims_nothing(self):
+        sock = FakeSock()
+        sock.would_block = float("inf")
+        with support.logging_enabled(), self.assertLogs("hypon.intercept", "WARNING") as logs:
+            await self.monitor.sweep(sock)                    # returns, never loops forever
+        self.assertIn("stays full", logs.records[0].getMessage())
+        self.monitor.refresh()
+        self.assertFalse(self.links[INV_IP].checked)
+
+    async def test_the_sweep_is_paced_in_small_batches(self):
+        delays, real_sleep = [], asyncio.sleep
+
+        async def spy(delay, *args):
+            delays.append(delay)
+            await real_sleep(0)
+        with (mock.patch.object(hi, "SWEEP_BATCH", 4), mock.patch.object(hi, "SWEEP_PAUSE_S", 0.01),
+              mock.patch.object(hi.asyncio, "sleep", spy)):
+            await self.monitor.sweep(FakeSock())
+        self.assertEqual(delays.count(0.01), len(self.HOSTS) // 4)   # a pause after every batch of 4
+
     async def test_a_failing_sweep_gives_up_without_claiming_anything(self):
         sock = FakeSock()
         sock.fail_send = True
@@ -737,9 +794,10 @@ class SweepScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.inv.known_mac = INV_MAC
         self.monitor = hi.LinkMonitor([self.inv], OUR_MAC, OUR_IP, {}, hosts=["192.168.1.9"],
                                       clock=lambda: self.now)
-        patcher = mock.patch.object(hi, "SWEEP_REPLY_WAIT_S", 0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name in ("SWEEP_REPLY_WAIT_S", "SWEEP_PAUSE_S"):
+            patcher = mock.patch.object(hi, name, 0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     async def sweeps_until(self, horizon):
         """Times (seconds from now) at which a sweep is made during the next `horizon` seconds."""
