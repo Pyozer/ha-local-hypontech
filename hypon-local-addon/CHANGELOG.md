@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.2 - 2026-11-23
+
+### Fixed
+- **An inverter that simply ran out of light at dusk was reported unavailable.** The
+  production fades to a few watts, then 0, and the inverter stops sending, but its Wi-Fi
+  collector can stay on the network for hours. The add-on took that for a lost inverter and
+  made the measurements *unavailable* all evening. The power of the last frame is now
+  looked at first: at most 20 W means it ran out of light, so it reads 0 W and stays
+  available. A changed IP address is still reported, and an inverter that was really
+  producing and vanished is still unavailable.
+- **The search of the local network almost never completed.** It sent 253 ARP requests at
+  once, which overflowed the send queue of the interface (`Resource temporarily
+  unavailable`) and made the whole search give up, so the network was never considered
+  looked at. The requests now go out in small batches, and a full queue is waited for.
+  This is what makes a changed IP address detectable.
+
 ## 0.5.1 - 2026-11-22
 
 ### Added
