@@ -106,13 +106,13 @@ class CloudRelayTests(RelayTestCase):
         cloud = await self.start_cloud()
         port = await self.start_bridge(cloud.port)
         _reader, writer = await self.collector(port)
-        writer.write(support.publish_packet("invmonitor", support.build_monitor(power=9, e_total=12.5)))
+        writer.write(support.publish_packet("invmonitor", support.build_monitor(power=90, e_total=12.5)))
         await wait_until(lambda: self.mqtt.last(f"hypon/{SN}/state") is not None)
         writer.close()
         await asyncio.sleep(0.05)                          # let the bridge notice the disconnection
         await self.bridge.refresh()
         self.assertEqual(self.mqtt.last(f"hypon/{SN}/status"), ("online", True))   # still trusted
-        self.assertEqual(self.state()["power"], 9)
+        self.assertEqual(self.state()["power"], 90)
         self.bridge.links["127.0.0.1"] = Link(alive=True, checked=True)   # still on the network
         self.clock.advance(self.cfg.offline_grace_s + 1)    # nothing came back
         await self.bridge.refresh()

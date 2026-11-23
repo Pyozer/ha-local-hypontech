@@ -18,7 +18,7 @@ IP, NEW_IP, MAC = "192.168.1.87", "192.168.1.140", "aa:bb:cc:dd:ee:ff"
 ABSENT = hs.Link(mac=MAC, checked=True)                 # the network was searched: nothing there
 ALIVE = hs.Link(mac=MAC, alive=True, checked=True)      # it answers the network
 MOVED = hs.Link(mac=MAC, moved_to=NEW_IP, checked=True)  # it is at another address
-PRODUCTION = dict(power=5, pv1=(30.0, 0.2), pv2=(28.0, 0.1), grid_v=229.5, grid_a=0.1,
+PRODUCTION = dict(power=87, pv1=(30.0, 2.9), pv2=(28.0, 2.9), grid_v=229.5, grid_a=0.4,
                   freq=50.1, temp=18.5, e_total=933.99, e_pv1=500.0, e_pv2=433.99)
 DEFAULT = object()
 
@@ -302,7 +302,7 @@ class UnreachableTests(BridgeTestCase):
 
     async def test_the_last_production_is_never_left_standing(self):
         # The incident: 87 W shown for hours although nothing came in any more.
-        await self.frame(**{**PRODUCTION, "power": 87})
+        await self.frame(**PRODUCTION)
         self.links[IP] = ALIVE
         await self.silence(GRACE + 1)
         state = self.state()
@@ -321,25 +321,86 @@ class UnreachableTests(BridgeTestCase):
 
     async def test_when_the_network_cannot_be_looked_at_it_is_not_claimed_to_be_off(self):
         # No ARP monitor (or no known MAC): "not seen" would mean nothing, so no 0 W is invented.
-        await self.frame()
+        await self.frame(power=87)
         self.links[IP] = hs.Link(mac=MAC)         # checked=False
         await self.silence(GRACE + 1)
         self.assertEqual(self.status(), "unreachable")
 
     async def test_an_inverter_with_an_unknown_address_is_never_taken_for_off(self):
-        await self.frame(session=None)
+        await self.frame(power=87, session=None)
         await self.silence(GRACE + 1)
         self.assertEqual(self.status(), "unreachable")
 
     async def test_a_slow_reporter_is_given_more_time(self):
         for _ in range(4):                       # a frame every 400 s: threshold becomes 1200 s
-            await self.frame()
+            await self.frame(power=87)
             self.clock.advance(400)
         self.links[IP] = ALIVE
         await self.silence(700)                  # 1100 s of silence: past the 300 s grace, not 1200 s
         self.assertEqual(self.status(), "online")
         await self.silence(200)
         self.assertEqual(self.status(), "unreachable")
+
+
+class FadedTests(BridgeTestCase):
+    """The evening of 22 November: the production faded to 0 W, the inverter fell silent, and its
+    Wi-Fi collector kept answering the network for hours. That is an inverter that ran out of
+    light (0 W, entities available), not a lost one."""
+
+    async def dusk(self, last_power, link):
+        for power in (7, 5, 1, last_power):                      # the evening fade
+            await self.frame(power=power, pv1=(23.0, 0.1))
+            self.clock.advance(30)
+        self.links[IP] = link
+        await self.silence(GRACE + 1)
+
+    async def test_a_collector_still_on_the_network_does_not_make_a_faded_inverter_unavailable(self):
+        await self.dusk(0, ALIVE)
+        self.assertEqual((self.status(), self.availability(), self.state()["power"]),
+                         ("sleeping", "online", 0))
+
+    async def test_nor_does_a_network_that_could_not_be_looked_at(self):
+        await self.dusk(0, hs.Link(mac=MAC))                    # checked=False
+        self.assertEqual((self.status(), self.availability()), ("sleeping", "online"))
+
+    async def test_it_stays_that_way_hour_after_hour_whatever_the_collector_does(self):
+        await self.dusk(0, ALIVE)
+        for link in (ALIVE, ABSENT, hs.Link(mac=MAC), ALIVE, hs.Link(mac=MAC, alive=True), ABSENT):
+            self.links[IP] = link
+            await self.silence(1800)
+            self.assertEqual((self.status(), self.availability()), ("sleeping", "online"))
+        self.assertEqual(self.mqtt.count(f"hypon/{SN}/status"), 2)       # online, then sleeping, once
+
+    async def test_the_production_must_really_have_faded(self):
+        await self.dusk(hs.FADED_POWER_W, ALIVE)                  # at the limit: still faded
+        self.assertEqual(self.status(), "sleeping")
+        await self.frame(power=hs.FADED_POWER_W + 1)              # clearly producing, then it vanishes
+        self.links[IP] = ALIVE
+        await self.silence(GRACE + 1)
+        self.assertEqual((self.status(), self.availability()), ("unreachable", "offline"))
+
+    async def test_only_the_last_frame_counts(self):
+        await self.frame(power=87)
+        self.clock.advance(30)
+        await self.frame(power=3)                                 # it had faded when it went silent
+        self.links[IP] = ALIVE
+        await self.silence(GRACE + 1)
+        self.assertEqual(self.status(), "sleeping")
+
+    async def test_an_address_change_is_still_reported_whatever_the_production(self):
+        await self.dusk(0, MOVED)
+        self.assertEqual((self.status(), self.availability()), ("ip_changed", "offline"))
+
+    async def test_the_last_production_survives_a_restart(self):
+        self.store = StateStore(self.enterContext(support.temp_dir()))
+        self.bridge = self.make_bridge()
+        await self.dusk(0, ALIVE)
+        self.store.flush(force=True)
+        self.mqtt = support.RecordingMqtt()
+        self.bridge = self.make_bridge(store=StateStore.open(self.store.path.rsplit("/", 1)[0]))
+        await self.bridge._on_local_connect()
+        await self.silence(GRACE + 1)
+        self.assertEqual((self.status(), self.state()["power"]), ("sleeping", 0))
 
 
 class IpChangedTests(BridgeTestCase):
@@ -544,7 +605,7 @@ class PersistenceTests(BridgeTestCase):
         self.assertEqual(self.availability(), "online")
 
     async def test_after_a_start_the_network_gets_time_to_be_looked_at_before_concluding(self):
-        await self.frame(power=5)
+        await self.frame(power=87)
         await self.silence(GRACE + 1)
         self.assertEqual(self.status(), "sleeping")
         self.links[IP] = hs.Link(mac=MAC)         # the monitor has not looked yet
@@ -589,7 +650,7 @@ class WatchdogTests(BridgeTestCase):
         directory = self.enterContext(support.temp_dir())
         self.store = StateStore(directory)
         self.bridge = self.make_bridge()
-        await self.frame()
+        await self.frame(power=87)
         self.links[IP] = ALIVE
         await self.silence(GRACE + 1)
         self.assertEqual(StateStore.open(directory).data["inverters"][SN]["status"], "unreachable")

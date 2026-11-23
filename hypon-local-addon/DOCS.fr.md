@@ -95,22 +95,30 @@ pas celle détectée.
 Le micro-onduleur et son collecteur Wi-Fi sont alimentés par les panneaux : sans lumière
 (nuit, orage, ombrage important) ils sont éteints et ne disent rien. Un onduleur dont
 l'adresse IP a changé ne dit rien non plus. Le silence seul est ambigu, et la position du
-soleil ne trancherait pas (le soleil est « levé » pendant un orage). Le **réseau**, lui,
-tranche : un onduleur alimenté répond à l'ARP, à son IP ou, si son adresse a changé, à une
-autre, toujours avec la même adresse MAC ; un onduleur éteint n'est visible nulle part.
-Après `offline_grace` secondes sans trame, l'add-on regarde, et donne à chaque onduleur un
-**statut** :
+soleil ne trancherait pas (le soleil est « levé » pendant un orage). Deux choses
+tranchent. Après `offline_grace` secondes sans trame, l'add-on regarde :
+
+1. **Ce que faisait l'onduleur quand il s'est tu.** Au crépuscule la production tombe à
+   quelques watts, puis 0, et l'onduleur s'arrête : c'est un onduleur qui n'a plus de
+   lumière. Celui dont la dernière trame montrait au plus **20 W** est considéré comme
+   éteint. Celui qui produisait nettement et a disparu n'est pas normal.
+2. **Le réseau.** Un onduleur alimenté répond à l'ARP, à son IP ou, si son adresse a
+   changé, à une autre, toujours avec la même adresse MAC. Attention : le collecteur Wi-Fi
+   reste souvent sur le réseau pendant des heures après que l'onduleur a cessé d'envoyer,
+   donc une réponse seule ne prouve rien, d'où l'ordre : le premier point passe d'abord.
+
+Chaque onduleur reçoit un **statut** :
 
 | Statut | Signification | Entités |
 |---|---|---|
 | `online` | Des trames arrivent | Valeurs en direct |
-| `sleeping` | Silencieux et **absent du réseau** : éteint faute de lumière | Disponibles, production à **0**, totaux conservés |
-| `unreachable` | Il répond au réseau mais n'envoie rien à l'add-on | **Indisponibles** |
+| `sleeping` | Silencieux, et il s'était **éteint en douceur** (dernière trame à 20 W au plus) ou il est **absent du réseau** : éteint faute de lumière | Disponibles, production à **0**, totaux conservés |
+| `unreachable` | Il produisait, puis a disparu alors qu'il est sur le réseau | **Indisponibles** |
 | `ip_changed` | Silencieux, et son adresse MAC a été vue sous **une autre IP** | **Indisponibles** |
 
-Ainsi, la nuit, ou sous un orage en plein jour, l'onduleur affiche **0 W** et jamais
-« indisponible ». Il ne devient indisponible que lorsqu'il y a une preuve positive qu'il
-est vivant mais pas joignable comme configuré.
+Ainsi, la nuit, au crépuscule, ou sous un orage en plein jour, l'onduleur affiche **0 W** et
+jamais « indisponible ». Il ne devient indisponible que s'il produisait vraiment puis a
+disparu sans s'être éteint en douceur, ou si son adresse a changé.
 
 Comment le réseau est observé : toutes les 30 secondes, l'add-on demande à chaque onduleur
 « es-tu là ? » (ARP). Tant que l'un ne répond pas, il demande aussi à **chaque adresse de
@@ -132,10 +140,11 @@ ne laisse jamais une valeur périmée (comme la dernière production avant une c
 courant) à l'écran. Les totaux ne sont pas remis à zéro : ils ne font qu'augmenter et la
 première trame après la panne ramène la bonne valeur.
 
-**Limites.** « Éteint » est déduit de l'absence de l'onduleur sur le réseau : un onduleur
-qui produit mais qu'on **ne voit pas du tout** (son Wi-Fi est coupé, par exemple, ou il est
-sur un autre réseau) affiche donc 0 W. L'add-on ne peut garantir que ce que le réseau lui
-montre. Il lui faut aussi l'adresse MAC de l'onduleur, apprise la première fois qu'il
+**Limites.** Un onduleur qui produisait moins de 20 W quand il a été perdu affiche 0 W (l'erreur
+est au plus de cet ordre). Et « éteint » est aussi déduit de l'absence de l'onduleur sur le
+réseau : un onduleur qui produit mais qu'on **ne voit pas du tout** (son Wi-Fi est coupé,
+par exemple, ou il est sur un autre réseau) affiche donc 0 W : l'add-on ne peut garantir que
+ce qu'il observe. Il lui faut aussi l'adresse MAC de l'onduleur, apprise la première fois qu'il
 l'intercepte ; sans elle (ou si la surveillance ARP ne peut pas tourner), un onduleur
 silencieux est déclaré `unreachable` plutôt que de deviner 0 W.
 

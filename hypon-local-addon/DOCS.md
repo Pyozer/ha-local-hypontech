@@ -93,21 +93,30 @@ default route. Only change it if your real gateway is not the detected one.
 The micro-inverter and its Wi-Fi collector are powered by the panels: with no light (night,
 storm, heavy shade) they are off and say nothing. An inverter whose IP address changed also
 says nothing. Silence alone is ambiguous, and the position of the sun would not settle it
-(the sun is "up" during a storm). The **network** does: an inverter that is powered answers
-ARP, at its IP or, if its address changed, at another one, always with the same MAC address;
-an inverter that is off is nowhere to be seen. After `offline_grace` seconds without a
-frame, the add-on looks, and gives every inverter a **status**:
+(the sun is "up" during a storm). Two things do. After `offline_grace` seconds without a
+frame, the add-on looks at:
+
+1. **What the inverter was doing when it fell silent.** At dusk the production fades to a few
+   watts, then 0, and the inverter stops: that is an inverter that ran out of light. One whose
+   last frame showed at most **20 W** is considered off. One that was clearly producing and
+   vanished is not normal.
+2. **The network.** A powered inverter answers ARP, at its IP or, if its address changed, at
+   another one, always with the same MAC address. Beware: the Wi-Fi collector often stays on
+   the network for hours after the inverter has stopped sending, so an answer alone proves
+   nothing, which is why the first point comes first.
+
+Every inverter gets a **status**:
 
 | Status | Meaning | Entities |
 |---|---|---|
 | `online` | Frames are arriving | Live values |
-| `sleeping` | Silent and **nowhere on the network**: off for lack of light | Available, production **0**, totals kept |
-| `unreachable` | It answers the network but sends nothing to the add-on | **Unavailable** |
+| `sleeping` | Silent, and it had **faded** (last frame at most 20 W) or is **nowhere on the network**: off for lack of light | Available, production **0**, totals kept |
+| `unreachable` | It was producing, then vanished although it is on the network | **Unavailable** |
 | `ip_changed` | Silent, and its MAC address was seen under **another IP** | **Unavailable** |
 
-So at night, or under a storm in the middle of the day, the inverter reads **0 W** and
-never "unavailable". It becomes unavailable only when there is positive evidence that it
-is alive but not reachable as configured.
+So at night, at dusk, or under a storm in the middle of the day, the inverter reads **0 W**
+and never "unavailable". It becomes unavailable only when it was really producing and then
+disappeared without having faded, or when its address changed.
 
 How the network is looked at: every 30 seconds the add-on asks each inverter "are you
 there?" (ARP). While one does not answer, it also asks **every address of your local
@@ -128,9 +137,11 @@ never leaves a stale value (such as the last production before a power cut) on s
 totals are not reset: they only increase and the first frame after the outage brings the
 right value.
 
-**Limits.** Being "off" is concluded from the inverter being absent from the network, so an
-inverter that is producing but **cannot be seen at all** (its Wi-Fi is down, for example, or
-it is on another network) reads 0 W. The add-on can only vouch for what the network shows.
+**Limits.** An inverter that was producing less than 20 W when it was lost reads 0 W (the
+error is at most that). And being "off" is also concluded from the inverter being absent
+from the network, so an inverter that is producing but **cannot be seen at all** (its Wi-Fi
+is down, for example, or it is on another network) reads 0 W: the add-on can only vouch for
+what it observes.
 It also needs the inverter's MAC address, which it learns the first time it intercepts it;
 without it (or if the ARP monitor cannot run) a silent inverter is reported `unreachable`
 rather than guessing 0 W.

@@ -18,7 +18,8 @@ On the Home Assistant host network, the add-on:
 3. relays the connection to the Hypon cloud (the vendor app keeps working),
    decodes the frames and publishes sensors via MQTT Discovery;
    a silent inverter is classified as off (no light: 0 W) or lost (unavailable)
-   from what ARP shows of it (answers / moved / absent), never left on a stale value;
+   from what it was doing when it went silent (faded to ~0 W) and what ARP shows of it
+   (answers / moved / absent), never left on a stale value;
 4. restores the inverter's ARP cache and removes its rules on shutdown.
 
 ## Layout

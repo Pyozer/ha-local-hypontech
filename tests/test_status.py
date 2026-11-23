@@ -43,6 +43,24 @@ class DecideTests(unittest.TestCase):
         # We cannot see: claiming "off" (a 0 W that may be false) would be dishonest.
         self.assertEqual(decide(link=hs.NO_LINK), hs.UNREACHABLE)
 
+    def test_an_inverter_that_had_faded_is_off_even_if_its_collector_answers(self):
+        self.assertEqual(hs.decide(THRESHOLD + 1, THRESHOLD, hs.Link(alive=True, checked=True), faded=True),
+                         hs.SLEEPING)
+
+    def test_an_inverter_that_had_faded_is_off_even_if_the_network_was_not_looked_at(self):
+        self.assertEqual(hs.decide(THRESHOLD + 1, THRESHOLD, hs.NO_LINK, faded=True), hs.SLEEPING)
+
+    def test_a_move_has_priority_over_fading(self):
+        moved = hs.Link(moved_to="192.168.1.140", checked=True)
+        self.assertEqual(hs.decide(THRESHOLD + 1, THRESHOLD, moved, faded=True), hs.IP_CHANGED)
+
+    def test_fading_means_nothing_while_frames_arrive(self):
+        self.assertEqual(hs.decide(0, THRESHOLD, hs.NO_LINK, faded=True), hs.ONLINE)
+
+    def test_without_fading_the_rules_are_unchanged(self):
+        alive = hs.Link(alive=True)
+        self.assertEqual(hs.decide(THRESHOLD + 1, THRESHOLD, alive, faded=False), hs.UNREACHABLE)
+
     def test_a_status_is_always_one_of_the_declared_ones(self):
         links = (hs.NO_LINK, ABSENT, hs.Link(alive=True), hs.Link(moved_to="1.2.3.4", checked=True))
         for link in links:

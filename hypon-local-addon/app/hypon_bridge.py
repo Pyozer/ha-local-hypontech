@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 
 from hypon_status import (
-    IP_CHANGED, NO_LINK, ONLINE, SLEEPING, STATUSES, UNAVAILABLE_STATUSES,
+    FADED_POWER_W, IP_CHANGED, NO_LINK, ONLINE, SLEEPING, STATUSES, UNAVAILABLE_STATUSES,
     Cadence, decide, stale_threshold,
 )
 from hypon_store import StateStore
@@ -485,7 +485,8 @@ class Bridge:
         link = self.links.get(unit.ip, NO_LINK) if unit.ip else NO_LINK
         if not link.checked and self._mono() - self._started < STARTUP_HOLD_S:
             return  # the network has not been looked at yet since the start: keep what we said
-        status = decide(self._mono() - unit.last_seen, self.stale_threshold(unit), link)
+        faded = unit.state.get("power", 0) <= FADED_POWER_W   # what it was doing when it went silent
+        status = decide(self._mono() - unit.last_seen, self.stale_threshold(unit), link, faded)
         if status == IP_CHANGED and unit.status != IP_CHANGED:
             LOG.warning("inverter %s: its MAC address %s is now at %s, not at %s any more. "
                         "Give it a fixed IP and set that address in inverter_ips.",
